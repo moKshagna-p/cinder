@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"cinder/audioinput"
 	"cinder/config"
 	"cinder/nowplaying"
 	"cinder/visualizer"
@@ -26,6 +27,7 @@ type Model struct {
 	width      int
 	height     int
 	vis        *visualizer.System
+	audio      *audioinput.Analyzer
 	now        nowplaying.Info
 	lastSongID string
 	lastFrame  time.Time
@@ -40,9 +42,11 @@ type Model struct {
 }
 
 func NewModel() Model {
+	audio := audioinput.NewAnalyzer(audioinput.ConfigFromEnv())
 	return Model{
-		vis: visualizer.NewSystem(particleCount),
-		now: nowplaying.Info{Source: "none", State: "stopped", Playing: false},
+		vis:   visualizer.NewSystem(particleCount),
+		audio: audio,
+		now:   nowplaying.Info{Source: "none", State: "stopped", Playing: false},
 		playingStyle: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F5F5F5")).
 			Bold(true),
@@ -82,6 +86,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		s := msg.String()
 		if s == "ctrl+c" || s == "q" || s == "esc" {
+			if m.audio != nil {
+				m.audio.Close()
+			}
 			return m, tea.Quit
 		}
 
@@ -102,6 +109,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastFrame = now
 		m.pulse += dt
+		if m.audio != nil {
+			audio := m.audio.Snapshot()
+			m.vis.SetAudioFeatures(visualizer.AudioFeatures{
+				Active: audio.Active,
+				Level:  audio.Level,
+				Bass:   audio.Bass,
+				Treble: audio.Treble,
+				Flux:   audio.Flux,
+				BPM:    audio.BPM,
+			})
+		}
 		m.vis.Update(dt)
 		return m, frameTick()
 
@@ -114,7 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		songID := info.SongKey()
 		if songID != m.lastSongID && info.Track != "" {
 			m.lastSongID = songID
-			m.vis.SetSongSignature(songID)
+			m.vis.SetSongSignature(songID, info.Track, info.Artist)
 			m.vis.SetPalette(config.PaletteFromSong(info.Track))
 			m.vis.Explode()
 			m.flashUntil = time.Now().Add(700 * time.Millisecond)
