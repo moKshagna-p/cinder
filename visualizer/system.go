@@ -2,6 +2,7 @@ package visualizer
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math"
 	"math/rand"
 	"strings"
@@ -44,6 +45,14 @@ type System struct {
 	targetEnergy float64
 	shockwave    float64
 	phase        float64
+	songClock    float64
+	bpm          float64
+	rhythmOffset float64
+	sectionLen   float64
+	sectionMorph float64
+	kick         float64
+	snare        float64
+	hat          float64
 	trail        []pixel
 }
 
@@ -54,6 +63,8 @@ func NewSystem(count int) *System {
 		palette:      config.DefaultPalette(),
 		energy:       1,
 		targetEnergy: 1,
+		bpm:          120,
+		sectionLen:   32,
 	}
 	for i := range s.particles {
 		s.particles[i] = s.spawn(true)
@@ -74,6 +85,21 @@ func (s *System) Resize(w, h int) {
 
 func (s *System) SetPalette(p config.Palette) {
 	s.palette = p
+}
+
+func (s *System) SetSongSignature(songKey string) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(songKey))
+	seed := h.Sum64()
+
+	s.songClock = 0
+	s.bpm = 88 + float64(seed%82) // 88..169
+	s.rhythmOffset = float64((seed>>8)%1000) / 1000.0
+	s.sectionLen = 24 + float64((seed>>20)%24) // 24..47 beats
+	s.sectionMorph = 0.5
+	s.kick = 0
+	s.snare = 0
+	s.hat = 0
 }
 
 func (s *System) SetPlaying(playing bool) {
@@ -108,8 +134,30 @@ func (s *System) Update(dt float64) {
 	s.energy += (s.targetEnergy - s.energy) * blendRate
 	s.phase += dt * (0.6 + s.energy*1.8)
 	s.shockwave *= math.Exp(-dt * 2.2)
+	if s.energy > 0.02 {
+		s.songClock += dt
+	}
+
+	beatsPerSec := s.bpm / 60.0
+	beat := fract(s.songClock*beatsPerSec + s.rhythmOffset)
+	bar := fract(s.songClock*beatsPerSec/4.0 + s.rhythmOffset*0.37)
+	eighth := fract(s.songClock*beatsPerSec*2.0 + s.rhythmOffset*1.31)
+	section := fract(s.songClock*beatsPerSec/s.sectionLen + s.rhythmOffset*0.17)
+
+	// Synthetic rhythm channels to mimic kick, snare, and hat dynamics.
+	rawKick := pulse(beat, 0.00, 0.10) + 0.35*pulse(beat, 0.50, 0.12)
+	rawSnare := pulse(beat, 0.50, 0.09) * (0.6 + 0.4*pulse(bar, 0.50, 0.25))
+	rawHat := pulse(eighth, 0.00, 0.045) + 0.65*pulse(eighth, 0.50, 0.045)
+	rawHat *= 0.6 + 0.4*math.Sin(2*math.Pi*bar+1.0)*0.5 + 0.2
+
+	rhythmBlend := 1 - math.Exp(-dt*12.0)
+	s.kick += (rawKick - s.kick) * rhythmBlend
+	s.snare += (rawSnare - s.snare) * rhythmBlend
+	s.hat += (rawHat - s.hat) * rhythmBlend
+	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+0.8*math.Sin(2*math.Pi*bar))
 
 	coreBreath := 0.8 + 0.2*math.Sin(s.phase*1.5)
+	rhythmDrive := 0.7*s.kick + 0.5*s.snare + 0.3*s.hat
 
 	for i := range s.particles {
 		p := &s.particles[i]
@@ -126,12 +174,13 @@ func (s *System) Update(dt float64) {
 		rx := dx / dist
 		ry := dy / dist
 
-		orbital := p.Orbit * (0.30 + 0.75*s.energy)
+		orbital := p.Orbit * (0.25 + 0.68*s.energy + 0.32*s.sectionMorph)
 		corePull := -0.24 * coreBreath
 		if s.energy > 0.6 {
 			corePull += 0.15
 		}
-		jitter := (s.rnd.Float64() - 0.5) * (1.6 + 6.0*s.energy)
+		corePull += 0.18 * s.kick
+		jitter := (s.rnd.Float64() - 0.5) * (1.4 + 5.0*s.energy + 2.2*s.hat)
 
 		ax := tx*orbital + rx*corePull + tx*jitter*0.25 + rx*jitter*0.5
 		ay := ty*orbital + ry*corePull + ty*jitter*0.25 + ry*jitter*0.5
@@ -141,8 +190,10 @@ func (s *System) Update(dt float64) {
 			ax += rx * shock
 			ay += ry * shock
 		}
+		ax += rx * (0.4 + 2.8*rhythmDrive) * math.Exp(-dist*0.04)
+		ay += ry * (0.4 + 2.8*rhythmDrive) * math.Exp(-dist*0.04)
 
-		damp := 0.996 - (1.0-s.energy)*0.08
+		damp := 0.996 - (1.0-s.energy)*0.08 - 0.01*s.hat
 		if damp < 0.82 {
 			damp = 0.82
 		}
@@ -158,7 +209,7 @@ func (s *System) Update(dt float64) {
 		p.X += p.VX * dt
 		p.Y += p.VY * dt
 
-		decay := p.Decay * (0.25 + 0.75*s.energy)
+		decay := p.Decay * (0.22 + 0.72*s.energy + 0.22*s.snare)
 		if s.energy < 0.1 {
 			decay = p.Decay * 0.1
 		}
@@ -179,14 +230,16 @@ func (s *System) Render() string {
 	b := make([]pixel, s.width*s.height)
 	if len(s.trail) == len(b) {
 		for i := range s.trail {
-			s.trail[i].r *= 0.90
-			s.trail[i].g *= 0.90
-			s.trail[i].b *= 0.90
-			s.trail[i].a *= 0.82
+			colorFade := 0.88 + 0.06*s.sectionMorph
+			alphaFade := 0.76 + 0.08*s.hat
+			s.trail[i].r *= colorFade
+			s.trail[i].g *= colorFade
+			s.trail[i].b *= colorFade
+			s.trail[i].a *= alphaFade
 			b[i] = s.trail[i]
 		}
 	}
-	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy)
+	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, s.kick, s.snare)
 
 	for _, p := range s.particles {
 		age := p.Life / p.MaxLife
@@ -211,13 +264,17 @@ func (s *System) Render() string {
 		if age > 0.85 {
 			c = config.Mix(c, s.palette.Highlight, (age-0.85)/0.15)
 		}
+		if s.snare > 0.2 {
+			c = config.Mix(c, s.palette.Highlight, clamp01(0.12+0.38*s.snare))
+		}
 
 		alpha := (0.35 + 1.05*age) * p.Brightness
-		alpha *= 0.45 + 0.55*s.energy
+		alpha *= 0.42 + 0.58*s.energy
+		alpha *= 0.92 + 0.45*s.kick + 0.22*s.snare
 		splat(&b, s.width, s.height, p.X, p.Y, c, alpha)
 	}
 
-	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy)
+	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, s.kick, s.snare)
 	if len(s.trail) == len(b) {
 		copy(s.trail, b)
 	}
@@ -277,8 +334,8 @@ func (s *System) spawn(initial bool) Particle {
 	}
 }
 
-func addCoreGlow(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, energy float64) {
-	radius := 5.5 + energy*4.0
+func addCoreGlow(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, energy, kick, snare float64) {
+	radius := 5.5 + energy*4.0 + kick*2.5
 	for oy := -7; oy <= 7; oy++ {
 		for ox := -14; ox <= 14; ox++ {
 			x := int(cx) + ox
@@ -291,8 +348,8 @@ func addCoreGlow(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, energ
 				continue
 			}
 			falloff := 1 - d/radius
-			c := config.Mix(p.Core, p.Highlight, 0.3+0.4*energy)
-			a := 0.42 * falloff * (0.65 + 0.35*energy)
+			c := config.Mix(p.Core, p.Highlight, clamp01(0.3+0.4*energy+0.35*snare))
+			a := 0.42 * falloff * (0.62 + 0.34*energy + 0.35*kick)
 			idx := y*w + x
 			(*buf)[idx] = blend((*buf)[idx], c, a)
 		}
@@ -322,12 +379,12 @@ func splat(buf *[]pixel, w, h int, x, y float64, c config.RGB, alpha float64) {
 	}
 }
 
-func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, phase, energy float64) {
+func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, phase, energy, sectionMorph, kick, snare float64) {
 	if w < 4 || h < 4 {
 		return
 	}
-	rx := math.Max(8, float64(w)*0.35)
-	ry := math.Max(4, float64(h)*0.24)
+	rx := math.Max(8, float64(w)*(0.31+0.08*sectionMorph))
+	ry := math.Max(4, float64(h)*(0.20+0.08*(1-sectionMorph)))
 
 	for y := 0; y < h; y++ {
 		fy := (float64(y) - cy) / ry
@@ -339,9 +396,9 @@ func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, ph
 			}
 
 			theta := math.Atan2(fy, fx)
-			ribbon := 0.5 + 0.5*math.Sin(theta*3.0+phase*1.2+r2*8.0)
+			ribbon := 0.5 + 0.5*math.Sin(theta*(2.2+2.0*sectionMorph)+phase*(1.0+0.5*kick)+r2*(7.0+3.0*snare))
 			falloff := math.Exp(-r2 * (1.8 + 0.5*(1-energy)))
-			a := falloff * (0.09 + 0.13*ribbon) * (0.35 + 0.65*energy)
+			a := falloff * (0.08 + 0.14*ribbon) * (0.34 + 0.66*energy) * (0.85 + 0.3*snare)
 			if a < 0.01 {
 				continue
 			}
@@ -389,4 +446,20 @@ func clamp01(x float64) float64 {
 		return 1
 	}
 	return x
+}
+
+func fract(x float64) float64 {
+	return x - math.Floor(x)
+}
+
+func pulse(phase, center, width float64) float64 {
+	d := math.Abs(phase - center)
+	if d > 0.5 {
+		d = 1 - d
+	}
+	if width <= 0 {
+		return 0
+	}
+	n := d / width
+	return math.Exp(-n * n * 3.4)
 }

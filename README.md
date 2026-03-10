@@ -16,6 +16,7 @@ If `nowplaying-cli` is installed, Cinder uses it first for more reliable now-pla
   - orbital drift and turbulence
   - dense glowing core
 - Song-change explosion from center
+- Rhythm-reactive motion layers (kick/snare/hat style pulses) with evolving sections per song
 - Pause handling: particles gradually decelerate and freeze
 - Resume handling: particles reignite and expand again
 - Per-song color palettes hashed from title

@@ -114,6 +114,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		songID := info.SongKey()
 		if songID != m.lastSongID && info.Track != "" {
 			m.lastSongID = songID
+			m.vis.SetSongSignature(songID)
 			m.vis.SetPalette(config.PaletteFromSong(info.Track))
 			m.vis.Explode()
 			m.flashUntil = time.Now().Add(700 * time.Millisecond)
