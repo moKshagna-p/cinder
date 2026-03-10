@@ -36,6 +36,7 @@ type Model struct {
 	pausedStyle  lipgloss.Style
 	idleStyle    lipgloss.Style
 	errStyle     lipgloss.Style
+	footerStyle  lipgloss.Style
 }
 
 func NewModel() Model {
@@ -43,13 +44,19 @@ func NewModel() Model {
 		vis: visualizer.NewSystem(particleCount),
 		now: nowplaying.Info{Source: "none", State: "stopped", Playing: false},
 		playingStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#C8C8C8")),
+			Foreground(lipgloss.Color("#F5F5F5")).
+			Bold(true),
 		pausedStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9A9A9A")),
+			Foreground(lipgloss.Color("#D0D0D0")),
 		idleStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7E7E7E")),
+			Foreground(lipgloss.Color("#B0B0B0")),
 		errStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E66A6A")),
+			Foreground(lipgloss.Color("#FF8F8F")).
+			Bold(true),
+		footerStyle: lipgloss.NewStyle().
+			Width(0).
+			Padding(0, 1).
+			Background(lipgloss.Color("#121212")),
 	}
 }
 
@@ -136,14 +143,17 @@ func (m Model) View() string {
 		style = m.idleStyle
 	}
 
-	maxLen := max(10, m.width-4)
+	maxLen := max(10, m.width-6)
 	line := style.Render(truncate(label, maxLen))
 
 	if time.Now().Before(m.flashUntil) {
-		glow := lipgloss.NewStyle().Foreground(lipgloss.Color("#DCDCDC"))
+		glow := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#2A2A2A")).
+			Bold(true)
 		line = glow.Render(truncate("* DETECTED *  "+label, maxLen))
 	}
-	footer := lipgloss.NewStyle().Width(m.width).Render(" " + line)
+	footer := m.footerStyle.Width(m.width).Render(line)
 
 	if frame == "" {
 		blank := strings.Repeat("\n", max(0, m.height-1))
