@@ -31,8 +31,23 @@ type pixel struct {
 	a float64
 }
 
+type Orbiter struct {
+	angle   float64
+	radius  float64
+	speed   float64
+	ellipse float64
+	phase   float64
+	x       float64
+	y       float64
+	prevX   float64
+	prevY   float64
+	bright  float64
+	pull    float64
+}
+
 type System struct {
 	particles []Particle
+	orbiters  []Orbiter
 	rnd       *rand.Rand
 	palette   config.Palette
 
@@ -53,6 +68,7 @@ type System struct {
 	kick         float64
 	snare        float64
 	hat          float64
+	voidRadius   float64
 	trail        []pixel
 }
 
@@ -65,10 +81,12 @@ func NewSystem(count int) *System {
 		targetEnergy: 1,
 		bpm:          120,
 		sectionLen:   32,
+		voidRadius:   4.5,
 	}
 	for i := range s.particles {
 		s.particles[i] = s.spawn(true)
 	}
+	s.initOrbiters(6)
 	return s
 }
 
@@ -81,6 +99,7 @@ func (s *System) Resize(w, h int) {
 	for i := range s.particles {
 		s.particles[i] = s.spawn(false)
 	}
+	s.reseedOrbitersGeometry()
 }
 
 func (s *System) SetPalette(p config.Palette) {
@@ -93,13 +112,53 @@ func (s *System) SetSongSignature(songKey string) {
 	seed := h.Sum64()
 
 	s.songClock = 0
-	s.bpm = 88 + float64(seed%82) // 88..169
+	s.bpm = 92 + float64(seed%49) // 92..140
 	s.rhythmOffset = float64((seed>>8)%1000) / 1000.0
-	s.sectionLen = 24 + float64((seed>>20)%24) // 24..47 beats
+	s.sectionLen = 32 + float64((seed>>20)%24) // 32..55 beats
 	s.sectionMorph = 0.5
 	s.kick = 0
 	s.snare = 0
 	s.hat = 0
+	s.voidRadius = 4.8 + float64((seed>>30)%26)/10.0
+	s.initOrbiters(4 + int((seed>>14)%4))
+}
+
+func (s *System) initOrbiters(n int) {
+	if n < 3 {
+		n = 3
+	}
+	s.orbiters = make([]Orbiter, n)
+	for i := range s.orbiters {
+		o := &s.orbiters[i]
+		o.angle = s.rnd.Float64() * 2 * math.Pi
+		o.radius = 6 + s.rnd.Float64()*18
+		o.speed = 0.18 + s.rnd.Float64()*0.45
+		o.ellipse = 0.55 + s.rnd.Float64()*0.65
+		o.phase = s.rnd.Float64() * 2 * math.Pi
+		o.bright = 0.6 + s.rnd.Float64()*0.7
+		o.pull = 0.4 + s.rnd.Float64()*0.8
+		o.x = s.cx
+		o.y = s.cy
+		o.prevX = s.cx
+		o.prevY = s.cy
+	}
+	s.reseedOrbitersGeometry()
+}
+
+func (s *System) reseedOrbitersGeometry() {
+	if len(s.orbiters) == 0 || s.width < 2 || s.height < 2 {
+		return
+	}
+	base := math.Min(float64(s.width), float64(s.height)) * 0.23
+	if base < 6 {
+		base = 6
+	}
+	for i := range s.orbiters {
+		o := &s.orbiters[i]
+		o.radius = base*(0.42+0.85*s.rnd.Float64()) + float64(i)
+		o.prevX = o.x
+		o.prevY = o.y
+	}
 }
 
 func (s *System) SetPlaying(playing bool) {
@@ -141,23 +200,37 @@ func (s *System) Update(dt float64) {
 	beatsPerSec := s.bpm / 60.0
 	beat := fract(s.songClock*beatsPerSec + s.rhythmOffset)
 	bar := fract(s.songClock*beatsPerSec/4.0 + s.rhythmOffset*0.37)
-	eighth := fract(s.songClock*beatsPerSec*2.0 + s.rhythmOffset*1.31)
 	section := fract(s.songClock*beatsPerSec/s.sectionLen + s.rhythmOffset*0.17)
 
-	// Synthetic rhythm channels to mimic kick, snare, and hat dynamics.
-	rawKick := pulse(beat, 0.00, 0.10) + 0.35*pulse(beat, 0.50, 0.12)
-	rawSnare := pulse(beat, 0.50, 0.09) * (0.6 + 0.4*pulse(bar, 0.50, 0.25))
-	rawHat := pulse(eighth, 0.00, 0.045) + 0.65*pulse(eighth, 0.50, 0.045)
-	rawHat *= 0.6 + 0.4*math.Sin(2*math.Pi*bar+1.0)*0.5 + 0.2
+	// Keep a simple synthetic groove: kick + snare + soft hats.
+	rawKick := pulse(beat, 0.00, 0.08)
+	rawSnare := pulse(beat, 0.50, 0.07) * (0.85 + 0.15*math.Sin(2*math.Pi*bar))
+	rawHat := 0.22 + 0.20*math.Sin(2*math.Pi*beat+2.1) + 0.10*math.Sin(4*math.Pi*beat+1.2)
+	if rawHat < 0 {
+		rawHat = 0
+	}
 
-	rhythmBlend := 1 - math.Exp(-dt*12.0)
+	rhythmBlend := 1 - math.Exp(-dt*10.0)
 	s.kick += (rawKick - s.kick) * rhythmBlend
 	s.snare += (rawSnare - s.snare) * rhythmBlend
 	s.hat += (rawHat - s.hat) * rhythmBlend
-	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+0.8*math.Sin(2*math.Pi*bar))
+	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section)
 
-	coreBreath := 0.8 + 0.2*math.Sin(s.phase*1.5)
-	rhythmDrive := 0.7*s.kick + 0.5*s.snare + 0.3*s.hat
+	coreBreath := 0.82 + 0.18*math.Sin(s.phase*1.1)
+	rhythmDrive := 0.95*s.kick + 0.45*s.snare
+	voidPulse := 0.7 + 0.3*s.kick
+
+	for i := range s.orbiters {
+		o := &s.orbiters[i]
+		o.prevX = o.x
+		o.prevY = o.y
+		o.angle += dt * (o.speed + 0.24*s.kick + 0.08*s.sectionMorph)
+		r := o.radius * (0.84 + 0.18*s.sectionMorph + 0.16*voidPulse)
+		ex := math.Cos(o.angle + o.phase)
+		ey := math.Sin(o.angle+o.phase) * o.ellipse
+		o.x = s.cx + ex*r
+		o.y = s.cy + ey*r*0.62
+	}
 
 	for i := range s.particles {
 		p := &s.particles[i]
@@ -174,26 +247,43 @@ func (s *System) Update(dt float64) {
 		rx := dx / dist
 		ry := dy / dist
 
-		orbital := p.Orbit * (0.25 + 0.68*s.energy + 0.32*s.sectionMorph)
-		corePull := -0.24 * coreBreath
+		orbital := p.Orbit * (0.22 + 0.52*s.energy + 0.26*s.sectionMorph)
+		corePull := -0.18 * coreBreath
 		if s.energy > 0.6 {
-			corePull += 0.15
+			corePull += 0.10
 		}
-		corePull += 0.18 * s.kick
-		jitter := (s.rnd.Float64() - 0.5) * (1.4 + 5.0*s.energy + 2.2*s.hat)
+		corePull += 0.20 * s.kick
+		wave := math.Sin(s.phase*1.4 + p.Twist*2.2 + dist*0.05)
+		drift := 0.30 * wave * (0.2 + 0.8*s.hat)
 
-		ax := tx*orbital + rx*corePull + tx*jitter*0.25 + rx*jitter*0.5
-		ay := ty*orbital + ry*corePull + ty*jitter*0.25 + ry*jitter*0.5
+		ax := tx*orbital + rx*corePull + tx*drift
+		ay := ty*orbital + ry*corePull + ty*drift
+
+		for j := range s.orbiters {
+			o := &s.orbiters[j]
+			odx := o.x - p.X
+			ody := o.y - p.Y
+			d2 := odx*odx + ody*ody + 0.7
+			invDist := 1.0 / math.Sqrt(d2)
+			ox := odx * invDist
+			oy := ody * invDist
+			swirlX := -oy
+			swirlY := ox
+			pull := (0.28 + 0.45*s.snare) * o.pull / d2
+			swirl := (0.18 + 0.28*s.hat) * o.pull / d2
+			ax += ox*pull + swirlX*swirl
+			ay += oy*pull + swirlY*swirl
+		}
 
 		if s.shockwave > 0.01 {
-			shock := s.shockwave * math.Exp(-dist*0.05) * 11.0
+			shock := s.shockwave * math.Exp(-dist*0.05) * 8.0
 			ax += rx * shock
 			ay += ry * shock
 		}
-		ax += rx * (0.4 + 2.8*rhythmDrive) * math.Exp(-dist*0.04)
-		ay += ry * (0.4 + 2.8*rhythmDrive) * math.Exp(-dist*0.04)
+		ax += rx * (0.24 + 2.0*rhythmDrive) * math.Exp(-dist*0.04)
+		ay += ry * (0.24 + 2.0*rhythmDrive) * math.Exp(-dist*0.04)
 
-		damp := 0.996 - (1.0-s.energy)*0.08 - 0.01*s.hat
+		damp := 0.994 - (1.0-s.energy)*0.06
 		if damp < 0.82 {
 			damp = 0.82
 		}
@@ -209,7 +299,7 @@ func (s *System) Update(dt float64) {
 		p.X += p.VX * dt
 		p.Y += p.VY * dt
 
-		decay := p.Decay * (0.22 + 0.72*s.energy + 0.22*s.snare)
+		decay := p.Decay * (0.20 + 0.64*s.energy + 0.18*s.snare)
 		if s.energy < 0.1 {
 			decay = p.Decay * 0.1
 		}
@@ -230,8 +320,8 @@ func (s *System) Render() string {
 	b := make([]pixel, s.width*s.height)
 	if len(s.trail) == len(b) {
 		for i := range s.trail {
-			colorFade := 0.88 + 0.06*s.sectionMorph
-			alphaFade := 0.76 + 0.08*s.hat
+			colorFade := 0.90 + 0.04*s.sectionMorph
+			alphaFade := 0.80 + 0.05*s.hat
 			s.trail[i].r *= colorFade
 			s.trail[i].g *= colorFade
 			s.trail[i].b *= colorFade
@@ -240,6 +330,8 @@ func (s *System) Render() string {
 		}
 	}
 	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, s.kick, s.snare)
+	applyVoid(&b, s.width, s.height, s.cx, s.cy, s.voidRadius*(0.9+0.45*s.kick))
+	drawOrbiters(&b, s.width, s.height, s.palette, s.orbiters, 0.45+0.55*s.energy)
 
 	for _, p := range s.particles {
 		age := p.Life / p.MaxLife
@@ -268,9 +360,9 @@ func (s *System) Render() string {
 			c = config.Mix(c, s.palette.Highlight, clamp01(0.12+0.38*s.snare))
 		}
 
-		alpha := (0.35 + 1.05*age) * p.Brightness
-		alpha *= 0.42 + 0.58*s.energy
-		alpha *= 0.92 + 0.45*s.kick + 0.22*s.snare
+		alpha := (0.28 + 0.86*age) * p.Brightness
+		alpha *= 0.40 + 0.56*s.energy
+		alpha *= 0.90 + 0.50*s.kick + 0.18*s.snare
 		splat(&b, s.width, s.height, p.X, p.Y, c, alpha)
 	}
 
@@ -335,7 +427,7 @@ func (s *System) spawn(initial bool) Particle {
 }
 
 func addCoreGlow(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, energy, kick, snare float64) {
-	radius := 5.5 + energy*4.0 + kick*2.5
+	radius := 5.0 + energy*3.2 + kick*2.0
 	for oy := -7; oy <= 7; oy++ {
 		for ox := -14; ox <= 14; ox++ {
 			x := int(cx) + ox
@@ -348,8 +440,8 @@ func addCoreGlow(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, energ
 				continue
 			}
 			falloff := 1 - d/radius
-			c := config.Mix(p.Core, p.Highlight, clamp01(0.3+0.4*energy+0.35*snare))
-			a := 0.42 * falloff * (0.62 + 0.34*energy + 0.35*kick)
+			c := config.Mix(p.Core, p.Highlight, clamp01(0.26+0.34*energy+0.28*snare))
+			a := 0.36 * falloff * (0.58 + 0.30*energy + 0.40*kick)
 			idx := y*w + x
 			(*buf)[idx] = blend((*buf)[idx], c, a)
 		}
@@ -383,8 +475,8 @@ func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, ph
 	if w < 4 || h < 4 {
 		return
 	}
-	rx := math.Max(8, float64(w)*(0.31+0.08*sectionMorph))
-	ry := math.Max(4, float64(h)*(0.20+0.08*(1-sectionMorph)))
+	rx := math.Max(8, float64(w)*(0.30+0.06*sectionMorph))
+	ry := math.Max(4, float64(h)*(0.22+0.05*(1-sectionMorph)))
 
 	for y := 0; y < h; y++ {
 		fy := (float64(y) - cy) / ry
@@ -396,9 +488,9 @@ func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, ph
 			}
 
 			theta := math.Atan2(fy, fx)
-			ribbon := 0.5 + 0.5*math.Sin(theta*(2.2+2.0*sectionMorph)+phase*(1.0+0.5*kick)+r2*(7.0+3.0*snare))
+			ribbon := 0.5 + 0.5*math.Sin(theta*(1.8+1.4*sectionMorph)+phase*(0.8+0.4*kick)+r2*(5.0+2.0*snare))
 			falloff := math.Exp(-r2 * (1.8 + 0.5*(1-energy)))
-			a := falloff * (0.08 + 0.14*ribbon) * (0.34 + 0.66*energy) * (0.85 + 0.3*snare)
+			a := falloff * (0.06 + 0.11*ribbon) * (0.30 + 0.62*energy) * (0.90 + 0.22*snare)
 			if a < 0.01 {
 				continue
 			}
@@ -407,6 +499,73 @@ func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, ph
 			idx := y*w + x
 			(*buf)[idx] = blend((*buf)[idx], c, a)
 		}
+	}
+}
+
+func applyVoid(buf *[]pixel, w, h int, cx, cy, radius float64) {
+	if radius < 1 {
+		return
+	}
+	x0 := int(cx - radius - 2)
+	x1 := int(cx + radius + 2)
+	y0 := int(cy - radius - 2)
+	y1 := int(cy + radius + 2)
+	if x0 < 0 {
+		x0 = 0
+	}
+	if y0 < 0 {
+		y0 = 0
+	}
+	if x1 > w-1 {
+		x1 = w - 1
+	}
+	if y1 > h-1 {
+		y1 = h - 1
+	}
+
+	for y := y0; y <= y1; y++ {
+		for x := x0; x <= x1; x++ {
+			dx := float64(x) - cx
+			dy := float64(y) - cy
+			d := math.Hypot(dx, dy*1.25)
+			if d > radius {
+				continue
+			}
+			t := 1 - d/radius
+			dim := 1 - 0.96*t*t
+			idx := y*w + x
+			(*buf)[idx].r *= dim
+			(*buf)[idx].g *= dim
+			(*buf)[idx].b *= dim
+			(*buf)[idx].a *= dim
+		}
+	}
+}
+
+func drawOrbiters(buf *[]pixel, w, h int, p config.Palette, orbiters []Orbiter, energy float64) {
+	for i := range orbiters {
+		o := orbiters[i]
+		trace := config.Mix(p.Highlight, p.Core, 0.30+0.20*float64(i%3))
+		traceA := (0.06 + 0.14*o.bright) * (0.35 + 0.65*energy)
+		drawLineGlow(buf, w, h, o.prevX, o.prevY, o.x, o.y, trace, traceA)
+		head := config.Mix(p.Highlight, p.Mid, 0.35)
+		splat(buf, w, h, o.x, o.y, head, (0.28+0.55*o.bright)*(0.45+0.55*energy))
+	}
+}
+
+func drawLineGlow(buf *[]pixel, w, h int, x0, y0, x1, y1 float64, c config.RGB, alpha float64) {
+	dx := x1 - x0
+	dy := y1 - y0
+	steps := int(math.Hypot(dx, dy) * 1.4)
+	if steps < 1 {
+		steps = 1
+	}
+	for i := 0; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		x := x0 + dx*t
+		y := y0 + dy*t
+		fade := 1 - t*0.7
+		splat(buf, w, h, x, y, c, alpha*fade)
 	}
 }
 

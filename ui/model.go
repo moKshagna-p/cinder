@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	particleCount = 420
+	particleCount = 280
 	frameRate     = 30
 )
 
