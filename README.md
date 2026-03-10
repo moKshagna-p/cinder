@@ -33,7 +33,34 @@ For true audio-reactive motion, Cinder can also analyze a live AVFoundation audi
 - `ui/` — Bubble Tea model, update loop, and terminal composition
 - `config/` — palette generation and color utilities
 
-## Requirements
+## Install
+
+```bash
+brew tap moKshagna-p/cinder
+brew install cinder
+```
+
+Then just run:
+
+```bash
+cinder
+```
+
+Optional enhancements after install:
+
+```bash
+# Real-time audio reactivity
+brew install ffmpeg
+CINDER_AUDIO_REACTIVE=1 cinder
+
+# Richer now-playing metadata
+brew install nowplaying-cli
+cinder
+```
+
+---
+
+## Requirements (manual build)
 
 - macOS
 - Go 1.22+
@@ -72,6 +99,7 @@ If you want the visuals to follow the actual music output, route your player aud
 Controls:
 
 - `q`, `esc`, or `ctrl+c` to quit
+- `m` to cycle animation modes (Nebula → Waveform → Spectrum → Vortex → Pulse)
 
 ## Build
 
