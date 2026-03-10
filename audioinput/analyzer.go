@@ -21,15 +21,30 @@ type Config struct {
 	FrameSize  int
 }
 
+// WaveformLen is the number of samples kept in the rolling waveform buffer.
+const WaveformLen = 256
+
+// SpectrumBands is the number of frequency bands in the spectrum snapshot.
+const SpectrumBands = 16
+
 type Features struct {
-	Active bool
-	Level  float64
-	Bass   float64
-	Treble float64
-	Flux   float64
-	BPM    float64
-	Err    string
-	Device string
+	Active   bool
+	Level    float64
+	Bass     float64
+	Treble   float64
+	MidRange float64 // mid-frequency energy (new)
+	Flux     float64
+	BPM      float64
+	Err      string
+	Device   string
+
+	// WaveformBuf holds the last WaveformLen normalised peak values [-1..1]
+	// representing the amplitude envelope over time (highs and lows).
+	WaveformBuf [WaveformLen]float64
+
+	// SpectrumBands holds SpectrumBands normalised band energies [0..1].
+	// Band 0 = sub-bass, Band 15 = high-treble.
+	Spectrum [SpectrumBands]float64
 }
 
 type Analyzer struct {
@@ -46,17 +61,26 @@ type Analyzer struct {
 type detectorState struct {
 	frameDur     float64
 	lowEnv       float64
+	midEnv       float64 // mid-frequency envelope follower
 	prevMix      float64
 	noiseFloor   float64
 	level        float64
 	bass         float64
 	treble       float64
+	midRange     float64
 	flux         float64
 	bpm          float64
 	history      []float64
 	historyIdx   int
 	historyCount int
 	framesToBPM  int
+
+	// rolling waveform: last WaveformLen frame-level amplitude values
+	waveform    [WaveformLen]float64
+	waveformIdx int
+
+	// per-band envelope followers for spectrum
+	bandEnv [SpectrumBands]float64
 }
 
 func ConfigFromEnv() Config {
@@ -218,8 +242,10 @@ func (d *detectorState) analyze(samples []float64) Features {
 	var sumSq float64
 	var bassSum float64
 	var trebleSum float64
+	var midSum float64
 	var peak float64
 
+	n := len(samples)
 	for _, sample := range samples {
 		absSample := math.Abs(sample)
 		if absSample > peak {
@@ -228,19 +254,29 @@ func (d *detectorState) analyze(samples []float64) Features {
 
 		sumSq += sample * sample
 
+		// Low envelope (bass ~20-250 Hz proxy via slow EMA)
 		d.lowEnv += 0.055 * (absSample - d.lowEnv)
 		bassSum += d.lowEnv
 
-		treble := absSample - d.lowEnv
+		// Mid envelope (~250-4000 Hz proxy) – faster than bass, slower than treble
+		d.midEnv += 0.18 * (absSample - d.midEnv)
+		midVal := d.midEnv - d.lowEnv
+		if midVal < 0 {
+			midVal = 0
+		}
+		midSum += midVal
+
+		treble := absSample - d.midEnv
 		if treble < 0 {
 			treble = 0
 		}
 		trebleSum += treble
 	}
 
-	rms := math.Sqrt(sumSq / float64(len(samples)))
-	bass := bassSum / float64(len(samples))
-	treble := trebleSum / float64(len(samples))
+	rms := math.Sqrt(sumSq / float64(n))
+	bass := bassSum / float64(n)
+	mid := midSum / float64(n)
+	treble := trebleSum / float64(n)
 	mix := 0.65*rms + 0.95*bass + 0.45*treble
 	rawFlux := mix - d.prevMix*0.93
 	d.prevMix = mix
@@ -257,7 +293,46 @@ func (d *detectorState) analyze(samples []float64) Features {
 	d.level += 0.30 * (clamp01(rms*4.6+peak*0.7) - d.level)
 	d.bass += 0.30 * (clamp01(bass*7.5) - d.bass)
 	d.treble += 0.30 * (clamp01(treble*11.0) - d.treble)
+	d.midRange += 0.30 * (clamp01(mid*9.0) - d.midRange)
 	d.flux += 0.42 * (clamp01(flux*18.0) - d.flux)
+
+	// --- waveform ring buffer: store signed peak (captures highs & lows) ---
+	framePeak := 0.0
+	for _, s := range samples {
+		if math.Abs(s) > math.Abs(framePeak) {
+			framePeak = s
+		}
+	}
+	d.waveform[d.waveformIdx] = framePeak
+	d.waveformIdx = (d.waveformIdx + 1) % WaveformLen
+
+	// --- pseudo spectrum: divide samples into bands by decimation ratio ---
+	// We simulate SpectrumBands frequency bands by partitioning samples and
+	// using different EMA speeds (slow EMA = low freq, fast EMA = high freq).
+	bandAlphas := [SpectrumBands]float64{}
+	for b := 0; b < SpectrumBands; b++ {
+		// alpha goes from 0.02 (sub-bass) to 0.50 (high treble)
+		bandAlphas[b] = 0.02 + 0.48*float64(b)/float64(SpectrumBands-1)
+	}
+	// Run per-band envelope followers over the frame
+	for _, sample := range samples {
+		absSample := math.Abs(sample)
+		for b := 0; b < SpectrumBands; b++ {
+			d.bandEnv[b] += bandAlphas[b] * (absSample - d.bandEnv[b])
+		}
+	}
+	// To make bands look like a spectrum (low bands = bass, high bands = treble)
+	// we compute each band's *relative* contribution by differencing adjacent slow envelopes.
+	var spec [SpectrumBands]float64
+	prev := 0.0
+	for b := 0; b < SpectrumBands; b++ {
+		v := d.bandEnv[b] - prev
+		if v < 0 {
+			v = 0
+		}
+		spec[b] = clamp01(v * (8.0 + float64(b)*1.5))
+		prev = d.bandEnv[b]
+	}
 
 	d.pushOnset(clamp01(flux * 22.0))
 	d.framesToBPM++
@@ -272,14 +347,21 @@ func (d *detectorState) analyze(samples []float64) Features {
 		}
 	}
 
-	return Features{
-		Active: d.level > 0.03 || d.flux > 0.03,
-		Level:  d.level,
-		Bass:   d.bass,
-		Treble: d.treble,
-		Flux:   d.flux,
-		BPM:    d.bpm,
+	f := Features{
+		Active:   d.level > 0.03 || d.flux > 0.03,
+		Level:    d.level,
+		Bass:     d.bass,
+		Treble:   d.treble,
+		MidRange: d.midRange,
+		Flux:     d.flux,
+		BPM:      d.bpm,
 	}
+	// copy waveform ordered oldest→newest
+	for i := 0; i < WaveformLen; i++ {
+		f.WaveformBuf[i] = d.waveform[(d.waveformIdx+i)%WaveformLen]
+	}
+	f.Spectrum = spec
+	return f
 }
 
 func (d *detectorState) pushOnset(v float64) {

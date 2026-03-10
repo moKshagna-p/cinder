@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -31,7 +29,6 @@ type Model struct {
 	now        nowplaying.Info
 	lastSongID string
 	lastFrame  time.Time
-	pulse      float64
 	flashUntil time.Time
 
 	playingStyle lipgloss.Style
@@ -48,19 +45,15 @@ func NewModel() Model {
 		audio: audio,
 		now:   nowplaying.Info{Source: "none", State: "stopped", Playing: false},
 		playingStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F5F5F5")).
-			Bold(true),
+			Foreground(lipgloss.Color("#E8E8E8")),
 		pausedStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D0D0D0")),
+			Foreground(lipgloss.Color("#666666")),
 		idleStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#B0B0B0")),
+			Foreground(lipgloss.Color("#444444")),
 		errStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF8F8F")).
-			Bold(true),
+			Foreground(lipgloss.Color("#FF6B6B")),
 		footerStyle: lipgloss.NewStyle().
-			Width(0).
-			Padding(0, 1).
-			Background(lipgloss.Color("#121212")),
+			Background(lipgloss.Color("#000000")),
 	}
 }
 
@@ -91,6 +84,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
+		if s == "m" || s == "M" {
+			m.vis.NextMode()
+		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -108,16 +104,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			dt = 1.0 / frameRate
 		}
 		m.lastFrame = now
-		m.pulse += dt
 		if m.audio != nil {
 			audio := m.audio.Snapshot()
 			m.vis.SetAudioFeatures(visualizer.AudioFeatures{
-				Active: audio.Active,
-				Level:  audio.Level,
-				Bass:   audio.Bass,
-				Treble: audio.Treble,
-				Flux:   audio.Flux,
-				BPM:    audio.BPM,
+				Active:      audio.Active,
+				Level:       audio.Level,
+				Bass:        audio.Bass,
+				Treble:      audio.Treble,
+				MidRange:    audio.MidRange,
+				Flux:        audio.Flux,
+				BPM:         audio.BPM,
+				WaveformBuf: audio.WaveformBuf,
+				Spectrum:    audio.Spectrum,
 			})
 		}
 		m.vis.Update(dt)
@@ -156,23 +154,76 @@ func (m Model) View() string {
 
 	frame := m.vis.Render()
 
-	label, style := m.songLabel()
-	if label == "" {
-		label = ""
-		style = m.idleStyle
+	// ── right-side HUD ───────────────────────────────────────────────────────
+	// Compose three segments that stack right-aligned in one footer line:
+	//   [track — artist]   ·   [mode]
+	// Everything sits on pure black, separated by a dim mid-dot.
+
+	modeStr := m.vis.Mode().String()
+
+	// mode pill: dim, small
+	modePill := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#3A3A3A")).
+		Render(strings.ToLower(modeStr))
+
+	// separator dot
+	sep := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#2A2A2A")).
+		Render("  ·  ")
+
+	// song info
+	track, artist := m.now.Track, m.now.Artist
+	var songSegment string
+	switch {
+	case m.now.Err != "":
+		songSegment = m.errStyle.Render("err")
+	case track == "" && artist == "":
+		songSegment = m.idleStyle.Render("—")
+	case artist == "":
+		songSegment = m.playingStyle.Render(track)
+	default:
+		trackPart := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C8C8C8")).
+			Render(track)
+		artistPart := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#555555")).
+			Render(artist)
+		dimDash := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#333333")).
+			Render("  —  ")
+		songSegment = trackPart + dimDash + artistPart
 	}
 
-	maxLen := max(10, m.width-6)
-	line := style.Render(truncate(label, maxLen))
+	// paused indicator (subtle, no "LIVE")
+	if !m.now.Playing && track != "" {
+		pausedDot := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3A3A3A")).
+			Render("⏸  ")
+		songSegment = pausedDot + songSegment
+	}
 
-	if time.Now().Before(m.flashUntil) {
-		glow := lipgloss.NewStyle().
+	// flash on song change: brief bright highlight on the track name only
+	if time.Now().Before(m.flashUntil) && track != "" {
+		songSegment = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#2A2A2A")).
-			Bold(true)
-		line = glow.Render(truncate("* DETECTED *  "+label, maxLen))
+			Render(track) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#333333")).Render("  —  ") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(artist)
 	}
-	footer := m.footerStyle.Width(m.width).Render(line)
+
+	// build the right-aligned block
+	// measure plain lengths for padding (strip ANSI would be ideal but lipgloss
+	// Width() on a rendered string handles it)
+	rightContent := songSegment + sep + modePill + "  "
+
+	// right-pad with spaces so it hugs the right edge
+	rightBlock := lipgloss.NewStyle().
+		Background(lipgloss.Color("#000000")).
+		Width(m.width).
+		Align(lipgloss.Right).
+		Render(rightContent)
+
+	footer := m.footerStyle.Width(m.width).Render(rightBlock)
 
 	if frame == "" {
 		blank := strings.Repeat("\n", max(0, m.height-1))
@@ -187,54 +238,13 @@ func (m Model) View() string {
 }
 
 func (m Model) songLabel() (string, lipgloss.Style) {
-	if m.now.Err != "" {
-		errText := "osascript error: " + m.now.Err
-		return errText, m.errStyle
-	}
-
-	if m.now.Track == "" && m.now.Artist == "" {
-		if m.now.State == "paused" || m.now.State == "playing" {
-			src := m.now.Source
-			if src == "" || src == "none" {
-				src = "player"
-			}
-			return src + " " + m.now.State + "  (no track metadata)", m.pausedStyle
-		}
-		return "no playback detected (Music/Spotify idle or permission blocked)", m.idleStyle
-	}
-
-	prefix := m.now.Source
-	if prefix == "" || prefix == "none" {
-		prefix = "Now Playing"
-	}
-
-	state := m.now.State
-	if state == "" {
-		state = "unknown"
-	}
-
-	if m.now.Artist == "" {
-		label := fmt.Sprintf("%s [%s]  %s", prefix, state, m.now.Track)
-		if m.now.Playing {
-			return m.decoratePlaying(label), m.playingStyle
-		}
-		return label, m.pausedStyle
-	}
-
-	label := fmt.Sprintf("%s [%s]  %s - %s", prefix, state, m.now.Track, m.now.Artist)
-	if m.now.Playing {
-		return m.decoratePlaying(label), m.playingStyle
-	}
-	return label, m.pausedStyle
+	// kept for compatibility — not used by the new View()
+	return m.now.Track, m.playingStyle
 }
 
-func (m Model) decoratePlaying(label string) string {
-	dots := []string{".", "..", "...", "...."}
-	idx := int(math.Mod(m.pulse*2.0, float64(len(dots))))
-	if idx < 0 {
-		idx = 0
-	}
-	return "LIVE" + dots[idx] + "  " + label
+func (m Model) decoratePlaying(_ string) string {
+	// no-op — "LIVE" removed
+	return m.now.Track
 }
 
 func truncate(s string, maxLen int) string {
