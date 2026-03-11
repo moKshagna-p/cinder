@@ -41,3 +41,68 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.archive }}
+
+  update-homebrew-tap:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      TAP_REPO: moKshagna-p/homebrew-cinder
+      FORMULA_PATH: Formula/cinder-tui.rb
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+    steps:
+      - name: Require tap token
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN secret is required to update ${TAP_REPO}."
+            exit 1
+          fi
+
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Read release asset digests
+        id: digests
+        run: |
+          version="${TAG#v}"
+          release_json="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets)"
+          arm_digest="$(printf '%s' "${release_json}" | jq -r '.assets[] | select(.name=="cinder_Darwin_arm64.tar.gz") | .digest' | sed 's/^sha256://')"
+          intel_digest="$(printf '%s' "${release_json}" | jq -r '.assets[] | select(.name=="cinder_Darwin_x86_64.tar.gz") | .digest' | sed 's/^sha256://')"
+
+          if [ -z "${arm_digest}" ] || [ -z "${intel_digest}" ]; then
+            echo "Missing release asset digest."
+            exit 1
+          fi
+
+          {
+            echo "version=${version}"
+            echo "arm_digest=${arm_digest}"
+            echo "intel_digest=${intel_digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Update formula
+        working-directory: tap
+        run: |
+          VERSION="${{ steps.digests.outputs.version }}" perl -0pi -e 's/version "\K[^"]+(?=")/$ENV{VERSION}/g' "${FORMULA_PATH}"
+          perl -0pi -e 's#sha256 "[0-9a-f]{64}"#sha256 "'"${{ steps.digests.outputs.arm_digest }}"'"#' "${FORMULA_PATH}"
+          perl -0pi -e 's#(on_intel do\s+url "[^"]+"\s+sha256 ")[0-9a-f]{64}#${1}'"${{ steps.digests.outputs.intel_digest }}"'#s' "${FORMULA_PATH}"
+
+      - name: Commit and push tap update
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- "${FORMULA_PATH}"; then
+            echo "No tap changes to commit."
+            exit 0
+          fi
+
+          git add "${FORMULA_PATH}"
+          git commit -m "Release cinder-tui ${{ steps.digests.outputs.version }}"
+          git push
