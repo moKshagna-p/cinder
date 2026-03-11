@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: arm64
+            archive: cinder_Darwin_arm64.tar.gz
+          - goarch: amd64
+            archive: cinder_Darwin_x86_64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: |
+          mkdir -p dist/${{ matrix.goarch }}
+          GOOS=darwin GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w" -o dist/${{ matrix.goarch }}/cinder .
+
+      - name: Package archive
+        run: |
+          tar -C dist/${{ matrix.goarch }} -czf dist/${{ matrix.archive }} cinder
+          shasum -a 256 dist/${{ matrix.archive }}
+
+      - name: Upload archive
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.archive }}

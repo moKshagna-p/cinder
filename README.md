@@ -46,6 +46,14 @@ Then just run:
 cinder
 ```
 
+Homebrew installs a prebuilt macOS binary from the tap, so end users do not need Go installed.
+
+If you prefer a single command without tapping first:
+
+```bash
+brew install moKshagna-p/cinder/cinder
+```
+
 Optional enhancements after install:
 
 ```bash
