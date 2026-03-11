@@ -51,7 +51,7 @@ Homebrew installs a prebuilt macOS binary from the tap, so end users do not need
 If you prefer a single command without tapping first:
 
 ```bash
-brew install moKshagna-p/cinder/cinder
+brew install moKshagna-p/cinder/cinder-tui
 ```
 
 Optional enhancements after install:
