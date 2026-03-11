@@ -37,7 +37,7 @@ For true audio-reactive motion, Cinder can also analyze a live AVFoundation audi
 
 ```bash
 brew tap moKshagna-p/cinder
-brew install cinder
+brew install cinder-tui
 ```
 
 Then just run:
