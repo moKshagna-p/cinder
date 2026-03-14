@@ -37,13 +37,31 @@ jobs:
           tar -C dist/${{ matrix.goarch }} -czf dist/${{ matrix.archive }} cinder
           shasum -a 256 dist/${{ matrix.archive }}
 
-      - name: Upload archive
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goarch }}-archive
+          path: dist/${{ matrix.archive }}
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.archive }}
+          files: |
+            dist/arm64-archive/cinder_Darwin_arm64.tar.gz
+            dist/amd64-archive/cinder_Darwin_x86_64.tar.gz
 
   update-homebrew-tap:
-    needs: build
+    needs: publish-release
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.ref_name }}
