@@ -46,6 +46,12 @@ Then just run:
 cinder
 ```
 
+If BlackHole is installed and available, `cinder` will automatically use it for the audio-reactive version. If you want the original non-audio-reactive view, run:
+
+```bash
+cinder --normal
+```
+
 Homebrew installs a prebuilt macOS binary from the tap, so end users do not need Go installed.
 
 If you prefer a single command without tapping first:
@@ -57,14 +63,17 @@ brew install moKshagna-p/cinder/cinder-tui
 Optional enhancements after install:
 
 ```bash
-# Real-time audio reactivity
-brew install ffmpeg
-CINDER_AUDIO_REACTIVE=1 cinder
+# One-time audio-reactive setup
+cinder --setup-audio
+cinder --doctor
+cinder
 
 # Richer now-playing metadata
 brew install nowplaying-cli
 cinder
 ```
+
+`ffmpeg` is installed automatically with `cinder-tui`. For full system-audio reactivity, users only need to install and configure `BlackHole 2ch` once. After that, plain `cinder` will automatically launch the BlackHole-driven version when it is available.
 
 ---
 
@@ -74,7 +83,7 @@ cinder
 - Go 1.22+
 - Apple Music and/or Spotify installed (optional but required for metadata)
 - `nowplaying-cli` (optional, recommended for better media session detection)
-- `ffmpeg` (optional, required for live audio-reactive input)
+- `ffmpeg` (required for live audio-reactive input, installed automatically by Homebrew)
 - A loopback input such as BlackHole (optional, recommended if you want system-output reactivity instead of microphone reactivity)
 
 ## Run
@@ -84,16 +93,34 @@ make tidy
 make run
 ```
 
-Enable live audio reactivity from the default input device:
+After BlackHole is configured once, plain `cinder` will launch the audio-reactive version automatically:
 
 ```bash
-CINDER_AUDIO_REACTIVE=1 make run
+go run .
 ```
 
-Use a specific AVFoundation audio input device, such as a loopback device:
+Force the original non-audio-reactive view:
 
 ```bash
-CINDER_AUDIO_DEVICE="BlackHole 2ch" make run
+go run . --normal
+```
+
+Use a specific AVFoundation audio input device explicitly:
+
+```bash
+go run . --audio-device "BlackHole 2ch"
+```
+
+List available audio devices:
+
+```bash
+go run . --list-audio-devices
+```
+
+Check whether `ffmpeg`, loopback inputs, and metadata helpers are available:
+
+```bash
+go run . --doctor
 ```
 
 If `nowplaying-cli` is installed but not compatible with your macOS version, force AppleScript backend:
@@ -102,7 +129,7 @@ If `nowplaying-cli` is installed but not compatible with your macOS version, for
 CINDER_NOWPLAYING_BACKEND=applescript make run
 ```
 
-If you want the visuals to follow the actual music output, route your player audio into a loopback input and point `CINDER_AUDIO_DEVICE` at that device. If you only enable `CINDER_AUDIO_REACTIVE=1`, Cinder will use the current default input device.
+If you want the visuals to follow the actual music output, route your player audio into a loopback input. When Cinder sees a preferred loopback device such as `BlackHole 2ch`, it will automatically choose the audio-reactive version on startup.
 
 Controls:
 

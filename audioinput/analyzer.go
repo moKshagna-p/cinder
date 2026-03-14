@@ -21,10 +21,7 @@ type Config struct {
 	FrameSize  int
 }
 
-// WaveformLen is the number of samples kept in the rolling waveform buffer.
 const WaveformLen = 256
-
-// SpectrumBands is the number of frequency bands in the spectrum snapshot.
 const SpectrumBands = 16
 
 type Features struct {
@@ -32,19 +29,16 @@ type Features struct {
 	Level    float64
 	Bass     float64
 	Treble   float64
-	MidRange float64 // mid-frequency energy (new)
+	MidRange float64
 	Flux     float64
+	Onset    float64
+	Centroid float64
 	BPM      float64
 	Err      string
 	Device   string
 
-	// WaveformBuf holds the last WaveformLen normalised peak values [-1..1]
-	// representing the amplitude envelope over time (highs and lows).
 	WaveformBuf [WaveformLen]float64
-
-	// SpectrumBands holds SpectrumBands normalised band energies [0..1].
-	// Band 0 = sub-bass, Band 15 = high-treble.
-	Spectrum [SpectrumBands]float64
+	Spectrum    [SpectrumBands]float64
 }
 
 type Analyzer struct {
@@ -59,28 +53,38 @@ type Analyzer struct {
 }
 
 type detectorState struct {
-	frameDur     float64
-	lowEnv       float64
-	midEnv       float64 // mid-frequency envelope follower
-	prevMix      float64
-	noiseFloor   float64
-	level        float64
-	bass         float64
-	treble       float64
-	midRange     float64
-	flux         float64
-	bpm          float64
+	sampleRate int
+	frameSize  int
+	hopSize    int
+	frameDur   float64
+
+	window     []float64
+	frame      []float64
+	frameFill  int
+	fftReal    []float64
+	fftImag    []float64
+	prevBins   []float64
+	bandEdges  [SpectrumBands + 1]int
+	bandEnv    [SpectrumBands]float64
+	bandCenter [SpectrumBands]float64
+
+	level       float64
+	bass        float64
+	midRange    float64
+	treble      float64
+	flux        float64
+	onset       float64
+	centroid    float64
+	bpm         float64
+	fluxFloor   float64
+	onsetFloor  float64
+	waveform    [WaveformLen]float64
+	waveformIdx int
+
 	history      []float64
 	historyIdx   int
 	historyCount int
 	framesToBPM  int
-
-	// rolling waveform: last WaveformLen frame-level amplitude values
-	waveform    [WaveformLen]float64
-	waveformIdx int
-
-	// per-band envelope followers for spectrum
-	bandEnv [SpectrumBands]float64
 }
 
 func ConfigFromEnv() Config {
@@ -98,9 +102,13 @@ func ConfigFromEnv() Config {
 		sampleRate = 22050
 	}
 
-	frameSize := envInt("CINDER_AUDIO_FRAME_SIZE", 1024)
-	if frameSize < 256 {
-		frameSize = 1024
+	frameSize := normalizeFrameSize(envInt("CINDER_AUDIO_FRAME_SIZE", 1024))
+
+	if device == "default" {
+		if preferred, ok, err := DetectPreferredInput(); err == nil && ok {
+			device = preferred
+			enabled = true
+		}
 	}
 
 	return Config{
@@ -198,17 +206,10 @@ func (a *Analyzer) captureOnce() error {
 		stderrLast = strings.TrimSpace(string(buf))
 	}()
 
-	state := detectorState{
-		frameDur: float64(a.cfg.FrameSize) / float64(a.cfg.SampleRate),
-		history:  make([]float64, int(math.Round(8.0/(float64(a.cfg.FrameSize)/float64(a.cfg.SampleRate))))),
-	}
-	if len(state.history) < 64 {
-		state.history = make([]float64, 64)
-	}
-
-	frameBytes := a.cfg.FrameSize * 4
+	state := newDetectorState(a.cfg)
+	frameBytes := state.hopSize * 4
 	buf := make([]byte, frameBytes)
-	samples := make([]float64, a.cfg.FrameSize)
+	samples := make([]float64, state.hopSize)
 
 	for {
 		if _, err := io.ReadFull(stdout, buf); err != nil {
@@ -223,145 +224,222 @@ func (a *Analyzer) captureOnce() error {
 			return err
 		}
 
-		for i := 0; i < a.cfg.FrameSize; i++ {
+		for i := 0; i < state.hopSize; i++ {
 			bits := binary.LittleEndian.Uint32(buf[i*4 : i*4+4])
 			samples[i] = float64(math.Float32frombits(bits))
 		}
 
-		features := state.analyze(samples)
-		features.Device = a.cfg.Device
-		a.setFeatures(features)
+		if features, ok := state.push(samples); ok {
+			features.Device = a.cfg.Device
+			a.setFeatures(features)
+		}
 	}
 }
 
-func (d *detectorState) analyze(samples []float64) Features {
+func newDetectorState(cfg Config) detectorState {
+	hopSize := cfg.FrameSize / 2
+	if hopSize < 128 {
+		hopSize = cfg.FrameSize
+	}
+	frameDur := float64(hopSize) / float64(cfg.SampleRate)
+	historyLen := int(math.Round(8.0 / frameDur))
+	if historyLen < 64 {
+		historyLen = 64
+	}
+
+	edges := logBandEdges(cfg.SampleRate, cfg.FrameSize)
+	state := detectorState{
+		sampleRate: cfg.SampleRate,
+		frameSize:  cfg.FrameSize,
+		hopSize:    hopSize,
+		frameDur:   frameDur,
+		window:     hannWindow(cfg.FrameSize),
+		frame:      make([]float64, cfg.FrameSize),
+		fftReal:    make([]float64, cfg.FrameSize),
+		fftImag:    make([]float64, cfg.FrameSize),
+		prevBins:   make([]float64, cfg.FrameSize/2),
+		bandEdges:  edges,
+		history:    make([]float64, historyLen),
+	}
+
+	for i := 0; i < SpectrumBands; i++ {
+		startHz := float64(edges[i]*cfg.SampleRate) / float64(cfg.FrameSize)
+		endHz := float64(edges[i+1]*cfg.SampleRate) / float64(cfg.FrameSize)
+		state.bandCenter[i] = (startHz + endHz) * 0.5
+	}
+	return state
+}
+
+func (d *detectorState) push(samples []float64) (Features, bool) {
 	if len(samples) == 0 {
-		return Features{}
+		return Features{}, false
 	}
 
+	if d.frameFill < d.frameSize {
+		n := copy(d.frame[d.frameFill:], samples)
+		d.frameFill += n
+		if d.frameFill < d.frameSize {
+			return Features{}, false
+		}
+		return d.analyzeFrame(), true
+	}
+
+	copy(d.frame, d.frame[d.hopSize:])
+	copy(d.frame[d.frameSize-d.hopSize:], samples)
+	return d.analyzeFrame(), true
+}
+
+func (d *detectorState) analyzeFrame() Features {
 	var sumSq float64
-	var bassSum float64
-	var trebleSum float64
-	var midSum float64
-	var peak float64
-
-	n := len(samples)
-	for _, sample := range samples {
-		absSample := math.Abs(sample)
-		if absSample > peak {
-			peak = absSample
-		}
-
-		sumSq += sample * sample
-
-		// Low envelope (bass ~20-250 Hz proxy via slow EMA)
-		d.lowEnv += 0.055 * (absSample - d.lowEnv)
-		bassSum += d.lowEnv
-
-		// Mid envelope (~250-4000 Hz proxy) – faster than bass, slower than treble
-		d.midEnv += 0.18 * (absSample - d.midEnv)
-		midVal := d.midEnv - d.lowEnv
-		if midVal < 0 {
-			midVal = 0
-		}
-		midSum += midVal
-
-		treble := absSample - d.midEnv
-		if treble < 0 {
-			treble = 0
-		}
-		trebleSum += treble
-	}
-
-	rms := math.Sqrt(sumSq / float64(n))
-	bass := bassSum / float64(n)
-	mid := midSum / float64(n)
-	treble := trebleSum / float64(n)
-	mix := 0.65*rms + 0.95*bass + 0.45*treble
-	rawFlux := mix - d.prevMix*0.93
-	d.prevMix = mix
-	if rawFlux < 0 {
-		rawFlux = 0
-	}
-
-	d.noiseFloor += 0.05 * (rawFlux - d.noiseFloor)
-	flux := rawFlux - d.noiseFloor*0.85
-	if flux < 0 {
-		flux = 0
-	}
-
-	d.level += 0.30 * (clamp01(rms*4.6+peak*0.7) - d.level)
-	d.bass += 0.30 * (clamp01(bass*7.5) - d.bass)
-	d.treble += 0.30 * (clamp01(treble*11.0) - d.treble)
-	d.midRange += 0.30 * (clamp01(mid*9.0) - d.midRange)
-	d.flux += 0.42 * (clamp01(flux*18.0) - d.flux)
-
-	// --- waveform ring buffer: store signed peak (captures highs & lows) ---
+	peak := 0.0
 	framePeak := 0.0
-	for _, s := range samples {
-		if math.Abs(s) > math.Abs(framePeak) {
-			framePeak = s
+	for i, sample := range d.frame {
+		if math.Abs(sample) > peak {
+			peak = math.Abs(sample)
+		}
+		if math.Abs(sample) > math.Abs(framePeak) {
+			framePeak = sample
+		}
+		sumSq += sample * sample
+		d.fftReal[i] = sample * d.window[i]
+		d.fftImag[i] = 0
+	}
+
+	rms := math.Sqrt(sumSq / float64(len(d.frame)))
+	fft(d.fftReal, d.fftImag)
+
+	var bandRaw [SpectrumBands]float64
+	var bandWeight [SpectrumBands]float64
+	var fluxSum float64
+	var totalMag float64
+	var centroidSum float64
+	half := d.frameSize / 2
+
+	for bin := 1; bin < half; bin++ {
+		real := d.fftReal[bin]
+		imag := d.fftImag[bin]
+		mag := math.Hypot(real, imag)
+		delta := mag - d.prevBins[bin]
+		if delta > 0 {
+			fluxSum += delta
+		}
+		d.prevBins[bin] = mag
+
+		totalMag += mag
+		freq := float64(bin*d.sampleRate) / float64(d.frameSize)
+		centroidSum += freq * mag
+
+		band := d.bandIndexForBin(bin)
+		if band >= 0 {
+			bandRaw[band] += mag
+			bandWeight[band]++
 		}
 	}
+
+	centroidHz := 0.0
+	if totalMag > 1e-9 {
+		centroidHz = centroidSum / totalMag
+	}
+	centroidNorm := normalizeCentroid(centroidHz, float64(d.sampleRate)/2)
+
+	var spectrum [SpectrumBands]float64
+	var bassRaw float64
+	var midRaw float64
+	var trebleRaw float64
+	for i := 0; i < SpectrumBands; i++ {
+		raw := 0.0
+		if totalMag > 1e-9 && bandWeight[i] > 0 {
+			raw = bandRaw[i] / totalMag * float64(SpectrumBands)
+		}
+		raw = clamp01(math.Sqrt(raw) * 1.7)
+
+		attack := 0.42
+		release := 0.14
+		if raw < d.bandEnv[i] {
+			attack = release
+		}
+		d.bandEnv[i] += (raw - d.bandEnv[i]) * attack
+		spectrum[i] = d.bandEnv[i]
+
+		center := d.bandCenter[i]
+		switch {
+		case center < 250:
+			bassRaw += raw
+		case center < 4000:
+			midRaw += raw
+		default:
+			trebleRaw += raw
+		}
+	}
+
+	bassRaw = clamp01(bassRaw / 3.5)
+	midRaw = clamp01(midRaw / 5.5)
+	trebleRaw = clamp01(trebleRaw / 5.0)
+
+	fluxRaw := 0.0
+	if totalMag > 1e-9 {
+		fluxRaw = fluxSum / totalMag
+	}
+	fluxRaw = clamp01(fluxRaw * 3.8)
+	d.fluxFloor += 0.05 * (fluxRaw - d.fluxFloor)
+	fluxSignal := fluxRaw - d.fluxFloor*0.85
+	if fluxSignal < 0 {
+		fluxSignal = 0
+	}
+
+	onsetRaw := clamp01(fluxSignal * (1.3 + 0.8*bassRaw + 0.35*trebleRaw))
+	d.onsetFloor += 0.04 * (onsetRaw - d.onsetFloor)
+	onsetSignal := onsetRaw - d.onsetFloor*0.92
+	if onsetSignal < 0 {
+		onsetSignal = 0
+	}
+
+	levelTarget := clamp01(rms*3.4 + peak*0.45)
+	d.level = smoothAttackRelease(d.level, levelTarget, 0.34, 0.12)
+	d.bass = smoothAttackRelease(d.bass, bassRaw, 0.38, 0.16)
+	d.midRange = smoothAttackRelease(d.midRange, midRaw, 0.34, 0.15)
+	d.treble = smoothAttackRelease(d.treble, trebleRaw, 0.40, 0.17)
+	d.flux = smoothAttackRelease(d.flux, clamp01(fluxSignal*2.2), 0.44, 0.18)
+	d.onset = smoothAttackRelease(d.onset, clamp01(onsetSignal*3.0), 0.62, 0.20)
+	d.centroid = smoothAttackRelease(d.centroid, centroidNorm, 0.28, 0.12)
+
 	d.waveform[d.waveformIdx] = framePeak
 	d.waveformIdx = (d.waveformIdx + 1) % WaveformLen
 
-	// --- pseudo spectrum: divide samples into bands by decimation ratio ---
-	// We simulate SpectrumBands frequency bands by partitioning samples and
-	// using different EMA speeds (slow EMA = low freq, fast EMA = high freq).
-	bandAlphas := [SpectrumBands]float64{}
-	for b := 0; b < SpectrumBands; b++ {
-		// alpha goes from 0.02 (sub-bass) to 0.50 (high treble)
-		bandAlphas[b] = 0.02 + 0.48*float64(b)/float64(SpectrumBands-1)
-	}
-	// Run per-band envelope followers over the frame
-	for _, sample := range samples {
-		absSample := math.Abs(sample)
-		for b := 0; b < SpectrumBands; b++ {
-			d.bandEnv[b] += bandAlphas[b] * (absSample - d.bandEnv[b])
-		}
-	}
-	// To make bands look like a spectrum (low bands = bass, high bands = treble)
-	// we compute each band's *relative* contribution by differencing adjacent slow envelopes.
-	var spec [SpectrumBands]float64
-	prev := 0.0
-	for b := 0; b < SpectrumBands; b++ {
-		v := d.bandEnv[b] - prev
-		if v < 0 {
-			v = 0
-		}
-		spec[b] = clamp01(v * (8.0 + float64(b)*1.5))
-		prev = d.bandEnv[b]
-	}
-
-	d.pushOnset(clamp01(flux * 22.0))
+	d.pushOnset(d.onset)
 	d.framesToBPM++
 	if d.historyCount >= len(d.history)/2 && d.framesToBPM >= 8 {
 		d.framesToBPM = 0
 		if bpm, ok := d.estimateBPM(); ok {
-			if d.bpm == 0 {
-				d.bpm = bpm
-			} else {
-				d.bpm += (bpm - d.bpm) * 0.18
-			}
+			d.bpm = smoothAttackRelease(d.bpm, bpm, 0.20, 0.08)
 		}
 	}
 
 	f := Features{
-		Active:   d.level > 0.03 || d.flux > 0.03,
+		Active:   d.level > 0.03 || d.flux > 0.04 || d.onset > 0.05,
 		Level:    d.level,
 		Bass:     d.bass,
 		Treble:   d.treble,
 		MidRange: d.midRange,
 		Flux:     d.flux,
+		Onset:    d.onset,
+		Centroid: d.centroid,
 		BPM:      d.bpm,
+		Spectrum: spectrum,
 	}
-	// copy waveform ordered oldest→newest
 	for i := 0; i < WaveformLen; i++ {
 		f.WaveformBuf[i] = d.waveform[(d.waveformIdx+i)%WaveformLen]
 	}
-	f.Spectrum = spec
 	return f
+}
+
+func (d *detectorState) bandIndexForBin(bin int) int {
+	for i := 0; i < SpectrumBands; i++ {
+		if bin >= d.bandEdges[i] && bin < d.bandEdges[i+1] {
+			return i
+		}
+	}
+	return SpectrumBands - 1
 }
 
 func (d *detectorState) pushOnset(v float64) {
@@ -400,7 +478,7 @@ func (d *detectorState) estimateBPM() (float64, bool) {
 		}
 	}
 
-	if bestScore < 0.08 {
+	if bestScore < 0.05 {
 		return 0, false
 	}
 	return bestBPM, true
@@ -444,6 +522,28 @@ func clamp01(x float64) float64 {
 		return 1
 	}
 	return x
+}
+
+func smoothAttackRelease(current, target, attack, release float64) float64 {
+	rate := release
+	if target > current {
+		rate = attack
+	}
+	return current + (target-current)*rate
+}
+
+func normalizeCentroid(hz, maxHz float64) float64 {
+	if hz <= 0 || maxHz <= 0 {
+		return 0
+	}
+	minHz := 80.0
+	if hz < minHz {
+		hz = minHz
+	}
+	if hz > maxHz {
+		hz = maxHz
+	}
+	return clamp01(math.Log(hz/minHz+1) / math.Log(maxHz/minHz+1))
 }
 
 func envTrue(name string) bool {

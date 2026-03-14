@@ -113,6 +113,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Treble:      audio.Treble,
 				MidRange:    audio.MidRange,
 				Flux:        audio.Flux,
+				Onset:       audio.Onset,
+				Centroid:    audio.Centroid,
 				BPM:         audio.BPM,
 				WaveformBuf: audio.WaveformBuf,
 				Spectrum:    audio.Spectrum,

@@ -93,6 +93,8 @@ type AudioFeatures struct {
 	Treble   float64
 	MidRange float64
 	Flux     float64
+	Onset    float64
+	Centroid float64
 	BPM      float64
 
 	// Rolling waveform (signed amplitude, oldest→newest)
@@ -142,10 +144,12 @@ type System struct {
 	// pulse rings
 	pulseRings []pulseRing
 	prevKick   float64 // edge-detect: only spawn on rising edge
+	prevOnset  float64
 
 	// vortex state
 	vortexPhase     float64
 	vortexBassAngle float64 // slow bass-driven rotation offset
+	audioPresence   float64
 
 	// synthetic waveform oscillators (always-on, used when audio inactive)
 	synthWavePhase [4]float64 // 4 oscillator phases
@@ -293,6 +297,29 @@ func (s *System) Explode() {
 	}
 }
 
+func (s *System) audioBurst(strength float64) {
+	if len(s.particles) == 0 || strength <= 0 {
+		return
+	}
+	count := 10 + int(math.Round(26*clamp01(strength)))
+	if count > len(s.particles) {
+		count = len(s.particles)
+	}
+	for i := 0; i < count; i++ {
+		idx := s.rnd.Intn(len(s.particles))
+		p := &s.particles[idx]
+		a := s.rnd.Float64() * 2 * math.Pi
+		speed := 5.0 + 24.0*strength + s.rnd.Float64()*8.0
+		p.X = s.cx + (s.rnd.Float64()-0.5)*(3.0+6.0*strength)
+		p.Y = s.cy + (s.rnd.Float64()-0.5)*(2.0+4.0*strength)
+		p.VX += math.Cos(a) * speed
+		p.VY += math.Sin(a) * speed * (0.7 + 0.3*s.rnd.Float64())
+		p.Brightness = math.Max(p.Brightness, 1.0+0.8*strength)
+		p.Life = math.Max(p.Life, 0.9+0.9*strength)
+		p.MaxLife = math.Max(p.MaxLife, p.Life)
+	}
+}
+
 func (s *System) Update(dt float64) {
 	if s.width < 2 || s.height < 2 {
 		return
@@ -327,16 +354,18 @@ func (s *System) Update(dt float64) {
 	if rawHat < 0 {
 		rawHat = 0
 	}
+	s.audioPresence *= math.Exp(-dt * 3.2)
 	if s.audio.Active {
-		audioKick := clamp01(0.30*s.audio.Level + 1.05*s.audio.Bass + 0.95*s.audio.Flux)
-		audioSnare := clamp01(0.22*s.audio.Level + 0.55*s.audio.Bass + 1.10*s.audio.Flux)
-		audioHat := clamp01(0.30*s.audio.Level + 0.85*s.audio.Treble + 0.45*s.audio.Flux)
-		audioBlend := clamp01(0.35 + 0.55*s.audio.Level + 0.35*s.audio.Flux)
+		audioKick := clamp01(0.20*s.audio.Level + 1.30*s.audio.Bass + 1.10*s.audio.Onset)
+		audioSnare := clamp01(0.18*s.audio.Level + 0.72*s.audio.MidRange + 0.95*s.audio.Onset + 0.22*s.audio.Flux)
+		audioHat := clamp01(0.18*s.audio.Level + 0.95*s.audio.Treble + 0.55*s.audio.Centroid + 0.38*s.audio.Flux)
+		audioBlend := clamp01(0.25 + 0.55*s.audio.Level + 0.50*s.audio.Onset + 0.20*s.audio.Flux)
 		rawKick = mix(rawKick, audioKick, audioBlend)
-		rawSnare = mix(rawSnare, audioSnare, audioBlend)
-		rawHat = mix(rawHat, audioHat, clamp01(audioBlend+0.10))
-		if s.audio.Flux > 0.55 {
-			s.shockwave = math.Max(s.shockwave, 0.18+0.45*s.audio.Flux)
+		rawSnare = mix(rawSnare, audioSnare, clamp01(audioBlend+0.08))
+		rawHat = mix(rawHat, audioHat, clamp01(audioBlend+0.12))
+		s.audioPresence = math.Max(s.audioPresence, clamp01(0.60*s.audio.Level+0.85*s.audio.Onset+0.35*s.audio.Flux))
+		if s.audio.Onset > 0.18 {
+			s.shockwave = math.Max(s.shockwave, 0.12+0.75*s.audio.Onset)
 		}
 	}
 
@@ -345,6 +374,10 @@ func (s *System) Update(dt float64) {
 	s.snare += (rawSnare - s.snare) * rhythmBlend
 	s.hat += (rawHat - s.hat) * rhythmBlend
 	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+math.Pi*s.profile.trippy)
+	if s.audio.Active && s.audio.Onset > 0.26 && s.prevOnset <= 0.26 {
+		s.audioBurst(clamp01(0.45*s.audio.Onset + 0.25*s.audio.Treble + 0.20*s.audio.Bass))
+	}
+	s.prevOnset = s.audio.Onset
 
 	coreBreath := 0.78 + 0.22*math.Sin(s.phase*(0.7+0.9*s.profile.drift))
 	if s.audio.Active {
@@ -389,7 +422,7 @@ func (s *System) Update(dt float64) {
 		}
 		corePull += 0.16 * s.kick
 		wave := math.Sin(s.phase*(1.0+1.6*s.profile.trippy) + p.Twist*(1.6+1.8*s.profile.chaos) + dist*(0.03+0.05*s.profile.trippy))
-		drift := (0.14 + 0.42*s.profile.trippy) * wave * (0.25 + 0.75*s.hat + 0.22*s.audio.Treble)
+		drift := (0.14 + 0.42*s.profile.trippy) * wave * (0.25 + 0.75*s.hat + 0.28*s.audio.Treble + 0.12*s.audio.Centroid)
 		shear := math.Sin(s.phase*0.45+p.Twist*3.2+dist*0.07) * (0.06 + 0.18*chaosScale)
 
 		ax := tx*orbital + rx*corePull + tx*drift + ry*shear
@@ -418,10 +451,16 @@ func (s *System) Update(dt float64) {
 		}
 		audioPush := 0.0
 		if s.audio.Active {
-			audioPush = 0.35*s.audio.Bass + 0.18*s.audio.Flux
+			audioPush = 0.42*s.audio.Bass + 0.18*s.audio.Flux + 0.10*s.audio.Onset
 		}
 		ax += rx * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
 		ay += ry * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
+
+		if s.audio.Active {
+			spin := (0.08 + 0.24*s.audio.MidRange + 0.16*s.audio.Centroid) * math.Exp(-dist*0.04)
+			ax += tx * spin
+			ay += ty * spin
+		}
 
 		damp := 0.988 - 0.014*s.profile.pace - (1.0-s.energy)*0.06
 		if damp < 0.79 {
@@ -530,8 +569,7 @@ func (s *System) Update(dt float64) {
 
 		var target float64
 		if s.audio.Active {
-			// blend: mostly real audio, keep a bit of synthetic for liveliness
-			target = s.audio.WaveformBuf[i]*0.85 + synthSample*0.15
+			target = s.audio.WaveformBuf[i]*0.92 + synthSample*0.08
 		} else {
 			target = synthSample * (0.4 + 0.6*s.energy)
 		}
@@ -540,8 +578,7 @@ func (s *System) Update(dt float64) {
 	for i := 0; i < audioinput.SpectrumBands; i++ {
 		var target float64
 		if s.audio.Active {
-			// blend real spectrum with synthetic so bars never sit at 0
-			target = s.audio.Spectrum[i]*0.75 + s.synthSpec[i]*0.25
+			target = s.audio.Spectrum[i]*0.90 + s.synthSpec[i]*0.10
 		} else {
 			target = s.synthSpec[i]
 		}
@@ -575,10 +612,29 @@ func (s *System) Render() string {
 // renderNebula is the original particle-cloud rendering path.
 func (s *System) renderNebula() string {
 	b := make([]pixel, s.width*s.height)
+	bassPulse := s.kick
+	midDrive := s.snare
+	trebleShimmer := s.hat
+	onsetFlash := 0.0
+	brightness := 0.0
+	centroidTint := 0.0
+	if s.audio.Active {
+		audioWeight := clamp01(0.35 + 0.65*s.audioPresence)
+		bassPulse = mix(bassPulse, s.audio.Bass, audioWeight)
+		midDrive = mix(midDrive, s.audio.MidRange, audioWeight)
+		trebleShimmer = mix(trebleShimmer, s.audio.Treble, audioWeight)
+		onsetFlash = s.audio.Onset
+		brightness = s.audio.Level
+		centroidTint = s.audio.Centroid
+	} else {
+		onsetFlash = s.kick
+		brightness = 0.55*s.energy + 0.45*s.kick
+		centroidTint = s.hat
+	}
 	if len(s.trail) == len(b) {
 		for i := range s.trail {
-			colorFade := 0.82 + 0.12*s.profile.trail + 0.03*s.sectionMorph
-			alphaFade := 0.64 + 0.18*s.profile.trail + 0.06*s.hat
+			colorFade := 0.80 + 0.10*s.profile.trail + 0.04*brightness
+			alphaFade := 0.60 + 0.16*s.profile.trail + 0.10*brightness + 0.08*trebleShimmer
 			s.trail[i].r *= colorFade
 			s.trail[i].g *= colorFade
 			s.trail[i].b *= colorFade
@@ -586,9 +642,9 @@ func (s *System) renderNebula() string {
 			b[i] = s.trail[i]
 		}
 	}
-	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, s.kick, s.snare, s.profile)
-	applyVoid(&b, s.width, s.height, s.cx, s.cy, s.voidRadius*(0.85+0.50*s.kick))
-	drawOrbiters(&b, s.width, s.height, s.palette, s.orbiters, 0.40+0.60*s.energy, s.profile)
+	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, bassPulse, midDrive, s.profile)
+	applyVoid(&b, s.width, s.height, s.cx, s.cy, s.voidRadius*(0.82+0.55*bassPulse))
+	drawOrbiters(&b, s.width, s.height, s.palette, s.orbiters, 0.35+0.55*s.energy+0.25*midDrive, s.profile)
 
 	for _, p := range s.particles {
 		age := p.Life / p.MaxLife
@@ -610,20 +666,23 @@ func (s *System) renderNebula() string {
 		if radiusNorm > 0.55 {
 			c = config.Mix(c, s.palette.Outer, (radiusNorm-0.55)/0.45)
 		}
+		if centroidTint > 0 {
+			c = config.Mix(c, s.palette.Highlight, clamp01(centroidTint*(0.18+0.42*radiusNorm)))
+		}
 		if age > 0.85 {
 			c = config.Mix(c, s.palette.Highlight, (age-0.85)/0.15)
 		}
-		if s.snare > 0.2 {
-			c = config.Mix(c, s.palette.Highlight, clamp01(0.12+0.38*s.snare))
+		if onsetFlash > 0.12 {
+			c = config.Mix(c, s.palette.Highlight, clamp01(0.10+0.55*onsetFlash))
 		}
 
 		alpha := (0.22 + 0.78*age) * p.Brightness
-		alpha *= 0.30 + 0.48*s.energy + 0.18*s.profile.glow
-		alpha *= 0.78 + 0.46*s.kick + 0.16*s.snare
+		alpha *= 0.28 + 0.48*s.energy + 0.18*s.profile.glow + 0.16*brightness
+		alpha *= 0.76 + 0.42*bassPulse + 0.22*onsetFlash + 0.10*trebleShimmer
 		splat(&b, s.width, s.height, p.X, p.Y, c, alpha)
 	}
 
-	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, s.kick, s.snare, s.profile)
+	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, bassPulse, onsetFlash, s.profile)
 	if len(s.trail) == len(b) {
 		copy(s.trail, b)
 	}
