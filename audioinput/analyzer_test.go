@@ -75,6 +75,41 @@ func TestAnalyzeFrameDetectsOnsetsAndTempo(t *testing.T) {
 	}
 }
 
+func TestAnalyzeFrameSteadyToneDoesNotOverTriggerOnsets(t *testing.T) {
+	state := newDetectorState(Config{SampleRate: 22050, FrameSize: 1024})
+	_, peakOnset := feedSignalPeakOnset(&state, sineWave(220, 22050, 1024*16, 0.85))
+	if peakOnset > 0.28 {
+		t.Fatalf("expected restrained onset for steady tone, got %.3f", peakOnset)
+	}
+}
+
+func TestAnalyzeFrameWaveformTracksSignalPolarity(t *testing.T) {
+	state := newDetectorState(Config{SampleRate: 22050, FrameSize: 1024})
+
+	samples := make([]float64, 4096)
+	for i := range samples {
+		if i%64 < 32 {
+			samples[i] = 0.8
+		} else {
+			samples[i] = -0.8
+		}
+	}
+
+	features := feedSignal(&state, samples)
+	minVal, maxVal := 0.0, 0.0
+	for _, v := range features.WaveformBuf {
+		if v < minVal {
+			minVal = v
+		}
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	if maxVal < 0.2 || minVal > -0.2 {
+		t.Fatalf("expected waveform buffer to preserve both polarities, got min=%.3f max=%.3f", minVal, maxVal)
+	}
+}
+
 func feedSignal(state *detectorState, samples []float64) Features {
 	hop := state.hopSize
 	var f Features

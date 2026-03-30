@@ -85,6 +85,8 @@ type detectorState struct {
 	historyIdx   int
 	historyCount int
 	framesToBPM  int
+
+	waveformStride int
 }
 
 func ConfigFromEnv() Config {
@@ -261,6 +263,7 @@ func newDetectorState(cfg Config) detectorState {
 		bandEdges:  edges,
 		history:    make([]float64, historyLen),
 	}
+	state.waveformStride = maxInt(1, hopSize/32)
 
 	for i := 0; i < SpectrumBands; i++ {
 		startHz := float64(edges[i]*cfg.SampleRate) / float64(cfg.FrameSize)
@@ -274,6 +277,8 @@ func (d *detectorState) push(samples []float64) (Features, bool) {
 	if len(samples) == 0 {
 		return Features{}, false
 	}
+
+	d.appendWaveform(samples)
 
 	if d.frameFill < d.frameSize {
 		n := copy(d.frame[d.frameFill:], samples)
@@ -292,13 +297,9 @@ func (d *detectorState) push(samples []float64) (Features, bool) {
 func (d *detectorState) analyzeFrame() Features {
 	var sumSq float64
 	peak := 0.0
-	framePeak := 0.0
 	for i, sample := range d.frame {
 		if math.Abs(sample) > peak {
 			peak = math.Abs(sample)
-		}
-		if math.Abs(sample) > math.Abs(framePeak) {
-			framePeak = sample
 		}
 		sumSq += sample * sample
 		d.fftReal[i] = sample * d.window[i]
@@ -318,10 +319,11 @@ func (d *detectorState) analyzeFrame() Features {
 	for bin := 1; bin < half; bin++ {
 		real := d.fftReal[bin]
 		imag := d.fftImag[bin]
-		mag := math.Hypot(real, imag)
+		mag := math.Log1p(math.Hypot(real, imag))
 		delta := mag - d.prevBins[bin]
 		if delta > 0 {
-			fluxSum += delta
+			freqWeight := 0.85 + 0.30*float64(bin)/float64(half)
+			fluxSum += delta * freqWeight
 		}
 		d.prevBins[bin] = mag
 
@@ -351,7 +353,7 @@ func (d *detectorState) analyzeFrame() Features {
 		if totalMag > 1e-9 && bandWeight[i] > 0 {
 			raw = bandRaw[i] / totalMag * float64(SpectrumBands)
 		}
-		raw = clamp01(math.Sqrt(raw) * 1.7)
+		raw = clamp01(1 - math.Exp(-1.55*raw))
 
 		attack := 0.42
 		release := 0.14
@@ -380,31 +382,25 @@ func (d *detectorState) analyzeFrame() Features {
 	if totalMag > 1e-9 {
 		fluxRaw = fluxSum / totalMag
 	}
-	fluxRaw = clamp01(fluxRaw * 3.8)
-	d.fluxFloor += 0.05 * (fluxRaw - d.fluxFloor)
-	fluxSignal := fluxRaw - d.fluxFloor*0.85
-	if fluxSignal < 0 {
-		fluxSignal = 0
-	}
-
-	onsetRaw := clamp01(fluxSignal * (1.3 + 0.8*bassRaw + 0.35*trebleRaw))
-	d.onsetFloor += 0.04 * (onsetRaw - d.onsetFloor)
-	onsetSignal := onsetRaw - d.onsetFloor*0.92
-	if onsetSignal < 0 {
-		onsetSignal = 0
-	}
+	fluxRaw = clamp01(fluxRaw * 1.7)
+	d.fluxFloor += 0.02 * (fluxRaw - d.fluxFloor)
+	fluxSignal := adaptiveExcess(fluxRaw, d.fluxFloor, 0.12)
 
 	levelTarget := clamp01(rms*3.4 + peak*0.45)
-	d.level = smoothAttackRelease(d.level, levelTarget, 0.34, 0.12)
-	d.bass = smoothAttackRelease(d.bass, bassRaw, 0.38, 0.16)
-	d.midRange = smoothAttackRelease(d.midRange, midRaw, 0.34, 0.15)
-	d.treble = smoothAttackRelease(d.treble, trebleRaw, 0.40, 0.17)
-	d.flux = smoothAttackRelease(d.flux, clamp01(fluxSignal*2.2), 0.44, 0.18)
-	d.onset = smoothAttackRelease(d.onset, clamp01(onsetSignal*3.0), 0.62, 0.20)
-	d.centroid = smoothAttackRelease(d.centroid, centroidNorm, 0.28, 0.12)
+	bassRise := math.Max(0, bassRaw-d.bass*0.92)
+	midRise := math.Max(0, midRaw-d.midRange*0.92)
+	transientDrive := clamp01(0.65*fluxSignal + 0.28*bassRise + 0.16*midRise)
+	onsetRaw := transientDrive * clamp01(0.30+0.70*levelTarget)
+	d.onsetFloor += 0.025 * (onsetRaw - d.onsetFloor)
+	onsetSignal := adaptiveExcess(onsetRaw, d.onsetFloor, 0.22)
 
-	d.waveform[d.waveformIdx] = framePeak
-	d.waveformIdx = (d.waveformIdx + 1) % WaveformLen
+	d.level = smoothAttackRelease(d.level, levelTarget, 0.24, 0.08)
+	d.bass = smoothAttackRelease(d.bass, bassRaw, 0.24, 0.10)
+	d.midRange = smoothAttackRelease(d.midRange, midRaw, 0.22, 0.10)
+	d.treble = smoothAttackRelease(d.treble, trebleRaw, 0.24, 0.11)
+	d.flux = smoothAttackRelease(d.flux, clamp01(fluxSignal*1.7), 0.26, 0.11)
+	d.onset = smoothAttackRelease(d.onset, clamp01(onsetSignal*1.8), 0.28, 0.12)
+	d.centroid = smoothAttackRelease(d.centroid, centroidNorm, 0.28, 0.12)
 
 	d.pushOnset(d.onset)
 	d.framesToBPM++
@@ -431,6 +427,39 @@ func (d *detectorState) analyzeFrame() Features {
 		f.WaveformBuf[i] = d.waveform[(d.waveformIdx+i)%WaveformLen]
 	}
 	return f
+}
+
+func (d *detectorState) appendWaveform(samples []float64) {
+	if len(samples) == 0 {
+		return
+	}
+
+	stride := d.waveformStride
+	if stride <= 0 {
+		stride = maxInt(1, len(samples)/8)
+	}
+	for start := 0; start < len(samples); start += stride {
+		end := start + stride
+		if end > len(samples) {
+			end = len(samples)
+		}
+		if end <= start {
+			continue
+		}
+
+		mean := 0.0
+		peak := 0.0
+		for _, sample := range samples[start:end] {
+			mean += sample
+			if math.Abs(sample) > math.Abs(peak) {
+				peak = sample
+			}
+		}
+		mean /= float64(end - start)
+		value := math.Tanh((0.75*mean + 0.25*peak) * 1.8)
+		d.waveform[d.waveformIdx] = value
+		d.waveformIdx = (d.waveformIdx + 1) % WaveformLen
+	}
 }
 
 func (d *detectorState) bandIndexForBin(bin int) int {
@@ -522,6 +551,21 @@ func clamp01(x float64) float64 {
 		return 1
 	}
 	return x
+}
+
+func adaptiveExcess(value, floor, margin float64) float64 {
+	threshold := floor + margin
+	if value <= threshold {
+		return 0
+	}
+	return clamp01((value - threshold) / math.Max(1e-9, 1-threshold))
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func smoothAttackRelease(current, target, attack, release float64) float64 {

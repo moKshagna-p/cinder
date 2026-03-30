@@ -356,26 +356,26 @@ func (s *System) Update(dt float64) {
 	}
 	s.audioPresence *= math.Exp(-dt * 3.2)
 	if s.audio.Active {
-		audioKick := clamp01(0.20*s.audio.Level + 1.30*s.audio.Bass + 1.10*s.audio.Onset)
-		audioSnare := clamp01(0.18*s.audio.Level + 0.72*s.audio.MidRange + 0.95*s.audio.Onset + 0.22*s.audio.Flux)
-		audioHat := clamp01(0.18*s.audio.Level + 0.95*s.audio.Treble + 0.55*s.audio.Centroid + 0.38*s.audio.Flux)
-		audioBlend := clamp01(0.25 + 0.55*s.audio.Level + 0.50*s.audio.Onset + 0.20*s.audio.Flux)
-		rawKick = mix(rawKick, audioKick, audioBlend)
-		rawSnare = mix(rawSnare, audioSnare, clamp01(audioBlend+0.08))
-		rawHat = mix(rawHat, audioHat, clamp01(audioBlend+0.12))
-		s.audioPresence = math.Max(s.audioPresence, clamp01(0.60*s.audio.Level+0.85*s.audio.Onset+0.35*s.audio.Flux))
-		if s.audio.Onset > 0.18 {
-			s.shockwave = math.Max(s.shockwave, 0.12+0.75*s.audio.Onset)
+		audioKick := clamp01(0.18*s.audio.Level + 0.72*s.audio.Bass + 0.38*s.audio.Onset + 0.08*s.audio.Flux)
+		audioSnare := clamp01(0.14*s.audio.Level + 0.62*s.audio.MidRange + 0.28*s.audio.Onset + 0.14*s.audio.Flux)
+		audioHat := clamp01(0.10*s.audio.Level + 0.70*s.audio.Treble + 0.22*s.audio.Centroid + 0.18*s.audio.Flux)
+		audioBlend := clamp01(0.82 + 0.18*s.audioPresence)
+		rawKick = mix(rawKick*0.08, audioKick, audioBlend)
+		rawSnare = mix(rawSnare*0.10, audioSnare, audioBlend)
+		rawHat = mix(rawHat*0.12, audioHat, audioBlend)
+		s.audioPresence = math.Max(s.audioPresence, clamp01(0.75*s.audio.Level+0.45*s.audio.Bass+0.28*s.audio.Onset+0.20*s.audio.Flux))
+		if s.audio.Onset > 0.30 {
+			s.shockwave = math.Max(s.shockwave, 0.06+0.40*s.audio.Onset)
 		}
 	}
 
-	rhythmBlend := 1 - math.Exp(-dt*(9.0+7.0*s.profile.punch))
+	rhythmBlend := 1 - math.Exp(-dt*(5.0+4.0*s.profile.punch+5.0*s.audioPresence))
 	s.kick += (rawKick - s.kick) * rhythmBlend
 	s.snare += (rawSnare - s.snare) * rhythmBlend
 	s.hat += (rawHat - s.hat) * rhythmBlend
 	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+math.Pi*s.profile.trippy)
-	if s.audio.Active && s.audio.Onset > 0.26 && s.prevOnset <= 0.26 {
-		s.audioBurst(clamp01(0.45*s.audio.Onset + 0.25*s.audio.Treble + 0.20*s.audio.Bass))
+	if s.audio.Active && s.audio.Onset > 0.42 && s.prevOnset <= 0.42 {
+		s.audioBurst(clamp01(0.24*s.audio.Onset + 0.10*s.audio.Treble + 0.12*s.audio.Bass))
 	}
 	s.prevOnset = s.audio.Onset
 
@@ -451,7 +451,7 @@ func (s *System) Update(dt float64) {
 		}
 		audioPush := 0.0
 		if s.audio.Active {
-			audioPush = 0.42*s.audio.Bass + 0.18*s.audio.Flux + 0.10*s.audio.Onset
+			audioPush = 0.18*s.audio.Bass + 0.06*s.audio.Flux + 0.05*s.audio.Onset
 		}
 		ax += rx * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
 		ay += ry * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
@@ -493,7 +493,7 @@ func (s *System) Update(dt float64) {
 	// --- vortex phase: always spinning, bass accelerates it ---
 	bassDriver := s.kick*0.8 + s.snare*0.3 + s.hat*0.15
 	if s.audio.Active {
-		bassDriver = clamp01(bassDriver + s.audio.Bass*1.2 + s.audio.Flux*0.4)
+		bassDriver = clamp01(0.25*bassDriver + 0.65*s.audio.Bass + 0.10*s.audio.Flux)
 	}
 	s.vortexPhase += dt * (0.8 + 2.5*s.profile.pace + 3.0*bassDriver)
 	s.vortexBassAngle += dt * (0.15 + 0.9*s.kick + 0.3*s.snare)
@@ -569,24 +569,42 @@ func (s *System) Update(dt float64) {
 
 		var target float64
 		if s.audio.Active {
-			target = s.audio.WaveformBuf[i]*0.92 + synthSample*0.08
+			target = s.audio.WaveformBuf[i]
 		} else {
 			target = synthSample * (0.4 + 0.6*s.energy)
 		}
-		s.waveSmooth[i] += (target - s.waveSmooth[i]) * clamp01(dt*8)
+		attack := clamp01(dt * 12)
+		release := clamp01(dt * 8)
+		if !s.audio.Active {
+			attack = clamp01(dt * 6.5)
+			release = attack
+		}
+		if target > s.waveSmooth[i] {
+			s.waveSmooth[i] += (target - s.waveSmooth[i]) * attack
+		} else {
+			s.waveSmooth[i] += (target - s.waveSmooth[i]) * release
+		}
 	}
 	for i := 0; i < audioinput.SpectrumBands; i++ {
 		var target float64
 		if s.audio.Active {
-			target = s.audio.Spectrum[i]*0.90 + s.synthSpec[i]*0.10
+			target = s.audio.Spectrum[i]
 		} else {
 			target = s.synthSpec[i]
 		}
 		// fast attack, slow decay
 		if target > s.specSmooth[i] {
-			s.specSmooth[i] += (target - s.specSmooth[i]) * clamp01(dt*28)
+			attack := clamp01(dt * 14)
+			if s.audio.Active {
+				attack = clamp01(dt * 24)
+			}
+			s.specSmooth[i] += (target - s.specSmooth[i]) * attack
 		} else {
-			s.specSmooth[i] += (target - s.specSmooth[i]) * clamp01(dt*7)
+			release := clamp01(dt * 5)
+			if s.audio.Active {
+				release = clamp01(dt * 8)
+			}
+			s.specSmooth[i] += (target - s.specSmooth[i]) * release
 		}
 	}
 }
@@ -714,7 +732,11 @@ func (s *System) renderWaveform() string {
 	if !s.audio.Active {
 		audioLevel = 0.5 + 0.5*s.kick // synthetic "level" from beat
 	}
-	scale := mid * (0.35 + 0.55*audioLevel + 0.20*s.kick)
+	bassDrive := s.kick
+	if s.audio.Active {
+		bassDrive = s.audio.Bass
+	}
+	scale := mid * (0.22 + 0.42*audioLevel + 0.12*bassDrive)
 
 	for x := 0; x < s.width; x++ {
 		idx := int(float64(x) * colStep)
@@ -774,14 +796,18 @@ func (s *System) renderWaveform() string {
 			c = config.Mix(c, s.palette.Highlight, clamp01(trebleVal*0.4))
 			c = config.Mix(c, s.palette.Core, clamp01(bassVal*0.3))
 
-			alpha := math.Max(edgeAlpha, fillAlpha) * (0.55 + 0.55*audioLevel)
+			alpha := math.Max(edgeAlpha, fillAlpha) * (0.42 + 0.42*audioLevel)
 			b[y*s.width+x] = blend(b[y*s.width+x], c, clamp01(alpha))
 		}
 
 		// bright dot on the wave surface
 		dotY := int(math.Round(ys))
 		if dotY >= 0 && dotY < s.height {
-			b[dotY*s.width+x] = blend(b[dotY*s.width+x], s.palette.Highlight, 0.85+0.15*s.kick)
+			dotAlpha := 0.72 + 0.12*s.kick
+			if s.audio.Active {
+				dotAlpha = 0.64 + 0.18*s.audio.Onset
+			}
+			b[dotY*s.width+x] = blend(b[dotY*s.width+x], s.palette.Highlight, dotAlpha)
 		}
 
 		// mirror image (inverted, dimmer) — gives symmetric oscilloscope look
@@ -801,8 +827,12 @@ func (s *System) renderWaveform() string {
 	}
 
 	// --- beat flash: vertical bright line on kick ---
-	if s.kick > 0.65 {
-		flashAlpha := (s.kick - 0.65) * 1.5
+	flashDrive := s.kick
+	if s.audio.Active {
+		flashDrive = s.audio.Onset
+	}
+	if flashDrive > 0.72 {
+		flashAlpha := (flashDrive - 0.72) * 1.1
 		for y := 0; y < s.height; y++ {
 			x := s.width / 2
 			b[y*s.width+x] = blend(b[y*s.width+x], s.palette.Highlight, flashAlpha*0.4)
@@ -837,7 +867,11 @@ func (s *System) renderSpectrum() string {
 		bandNorm := float64(band) / float64(bands-1) // 0=bass, 1=treble
 
 		// bar height scales with energy and overall kick boost
-		barH := int(math.Round(energy * float64(s.height) * (0.88 + 0.15*s.kick)))
+		boost := 0.82 + 0.10*s.kick
+		if s.audio.Active {
+			boost = 0.74 + 0.08*s.audio.Level
+		}
+		barH := int(math.Round(energy * float64(s.height) * boost))
 		if barH < 1 {
 			barH = 0
 		}
@@ -894,9 +928,13 @@ func (s *System) renderSpectrum() string {
 	}
 
 	// --- beat flash: full-width highlight row at top on kick ---
-	if s.kick > 0.50 {
+	flashDrive := s.kick
+	if s.audio.Active {
+		flashDrive = s.audio.Onset
+	}
+	if flashDrive > 0.68 {
 		for x := 0; x < s.width; x++ {
-			b[0*s.width+x] = blend(b[0*s.width+x], s.palette.Highlight, (s.kick-0.50)*0.9)
+			b[0*s.width+x] = blend(b[0*s.width+x], s.palette.Highlight, (flashDrive-0.68)*0.45)
 		}
 	}
 
@@ -921,8 +959,8 @@ func (s *System) renderVortex() string {
 	bassMod := s.kick*0.7 + s.snare*0.3
 	trebleMod := s.hat
 	if s.audio.Active {
-		bassMod = s.audio.Bass*0.6 + kickMod*0.4
-		trebleMod = s.audio.Treble*0.6 + hatMod*0.4
+		bassMod = s.audio.Bass*0.82 + kickMod*0.18
+		trebleMod = s.audio.Treble*0.82 + hatMod*0.18
 	}
 
 	for y := 0; y < s.height; y++ {
