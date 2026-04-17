@@ -136,8 +136,10 @@ type System struct {
 
 	// waveform display smoothing
 	waveSmooth [audioinput.WaveformLen]float64
+	waveVel    [audioinput.WaveformLen]float64
 	// spectrum bar heights (display, smoothed)
 	specSmooth [audioinput.SpectrumBands]float64
+	specVel    [audioinput.SpectrumBands]float64
 	// synthetic spectrum driven from beat clock (always-on fallback)
 	synthSpec [audioinput.SpectrumBands]float64
 
@@ -148,8 +150,12 @@ type System struct {
 
 	// vortex state
 	vortexPhase     float64
+	vortexVel       float64 // rotational momentum
 	vortexBassAngle float64 // slow bass-driven rotation offset
 	audioPresence   float64
+	audioLow        float64
+	audioMid        float64
+	audioHigh       float64
 
 	// synthetic waveform oscillators (always-on, used when audio inactive)
 	synthWavePhase [4]float64 // 4 oscillator phases
@@ -354,28 +360,53 @@ func (s *System) Update(dt float64) {
 	if rawHat < 0 {
 		rawHat = 0
 	}
+
+	audioLow := s.kick
+	audioMid := s.snare
+	audioHigh := s.hat
+	if s.audio.Active {
+		var lowSum, midSum, highSum float64
+		for i := 0; i < audioinput.SpectrumBands; i++ {
+			v := s.audio.Spectrum[i]
+			switch {
+			case i <= 3:
+				lowSum += v
+			case i <= 10:
+				midSum += v
+			default:
+				highSum += v
+			}
+		}
+		audioLow = clamp01(lowSum / 4.0)
+		audioMid = clamp01(midSum / 7.0)
+		audioHigh = clamp01(highSum / 5.0)
+	}
+
 	s.audioPresence *= math.Exp(-dt * 3.2)
 	if s.audio.Active {
-		audioKick := clamp01(0.18*s.audio.Level + 0.72*s.audio.Bass + 0.38*s.audio.Onset + 0.08*s.audio.Flux)
-		audioSnare := clamp01(0.14*s.audio.Level + 0.62*s.audio.MidRange + 0.28*s.audio.Onset + 0.14*s.audio.Flux)
-		audioHat := clamp01(0.10*s.audio.Level + 0.70*s.audio.Treble + 0.22*s.audio.Centroid + 0.18*s.audio.Flux)
-		audioBlend := clamp01(0.82 + 0.18*s.audioPresence)
-		rawKick = mix(rawKick*0.08, audioKick, audioBlend)
-		rawSnare = mix(rawSnare*0.10, audioSnare, audioBlend)
-		rawHat = mix(rawHat*0.12, audioHat, audioBlend)
-		s.audioPresence = math.Max(s.audioPresence, clamp01(0.75*s.audio.Level+0.45*s.audio.Bass+0.28*s.audio.Onset+0.20*s.audio.Flux))
-		if s.audio.Onset > 0.30 {
-			s.shockwave = math.Max(s.shockwave, 0.06+0.40*s.audio.Onset)
+		audioKick := clamp01(0.14*s.audio.Level + 0.56*audioLow + 0.20*s.audio.Onset + 0.04*s.audio.Flux)
+		audioSnare := clamp01(0.12*s.audio.Level + 0.46*audioMid + 0.16*s.audio.Onset + 0.08*s.audio.Flux)
+		audioHat := clamp01(0.08*s.audio.Level + 0.50*audioHigh + 0.12*s.audio.Centroid + 0.08*s.audio.Flux)
+		audioBlend := clamp01(0.52 + 0.18*s.audioPresence)
+		rawKick = mix(rawKick*0.40, audioKick, audioBlend)
+		rawSnare = mix(rawSnare*0.42, audioSnare, audioBlend)
+		rawHat = mix(rawHat*0.45, audioHat, audioBlend)
+		s.audioPresence = math.Max(s.audioPresence, clamp01(0.58*s.audio.Level+0.34*audioLow+0.20*s.audio.Onset+0.12*s.audio.Flux))
+		if s.audio.Onset > 0.44 {
+			s.shockwave = math.Max(s.shockwave, 0.04+0.26*s.audio.Onset)
 		}
 	}
 
-	rhythmBlend := 1 - math.Exp(-dt*(5.0+4.0*s.profile.punch+5.0*s.audioPresence))
+	rhythmBlend := 1 - math.Exp(-dt*(3.4+2.2*s.profile.punch+2.8*s.audioPresence))
 	s.kick += (rawKick - s.kick) * rhythmBlend
 	s.snare += (rawSnare - s.snare) * rhythmBlend
 	s.hat += (rawHat - s.hat) * rhythmBlend
+	s.audioLow = s.audioLow + (audioLow-s.audioLow)*(1-math.Exp(-dt*5.0))
+	s.audioMid = s.audioMid + (audioMid-s.audioMid)*(1-math.Exp(-dt*5.5))
+	s.audioHigh = s.audioHigh + (audioHigh-s.audioHigh)*(1-math.Exp(-dt*6.0))
 	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+math.Pi*s.profile.trippy)
-	if s.audio.Active && s.audio.Onset > 0.42 && s.prevOnset <= 0.42 {
-		s.audioBurst(clamp01(0.24*s.audio.Onset + 0.10*s.audio.Treble + 0.12*s.audio.Bass))
+	if s.audio.Active && s.audio.Onset > 0.58 && s.prevOnset <= 0.58 {
+		s.audioBurst(clamp01(0.14*s.audio.Onset + 0.06*s.audioHigh + 0.10*s.audioLow))
 	}
 	s.prevOnset = s.audio.Onset
 
@@ -428,6 +459,20 @@ func (s *System) Update(dt float64) {
 		ax := tx*orbital + rx*corePull + tx*drift + ry*shear
 		ay := ty*orbital + ry*corePull + ty*drift - rx*shear
 
+		// --- turbulence field: multi-scale noise ---
+		// Creates fluid-like swirling motion that varies with chaos/trippy profile
+		tPhase := s.phase * 0.65
+		turbScale := 0.12 + 0.25*s.profile.chaos
+		turbStrength := 0.35 + 1.2*s.profile.chaos + 0.35*s.audio.Flux
+
+		// Coarse turbulence (large-scale flow)
+		ax += math.Sin(p.Y*turbScale+tPhase) * turbStrength
+		ay += math.Cos(p.X*turbScale+tPhase) * turbStrength
+
+		// Fine turbulence (micro-swirls)
+		ax += math.Sin(p.Y*turbScale*3.1-tPhase*1.4) * turbStrength * 0.35
+		ay += math.Cos(p.X*turbScale*3.1-tPhase*1.4) * turbStrength * 0.35
+
 		for j := range s.orbiters {
 			o := &s.orbiters[j]
 			odx := o.x - p.X
@@ -445,30 +490,36 @@ func (s *System) Update(dt float64) {
 		}
 
 		if s.shockwave > 0.01 {
-			shock := s.shockwave * math.Exp(-dist*0.05) * (6.0 + 6.0*s.profile.punch)
+			shock := s.shockwave * math.Exp(-dist*0.05) * (3.2 + 3.6*s.profile.punch)
 			ax += rx * shock
 			ay += ry * shock
 		}
 		audioPush := 0.0
 		if s.audio.Active {
-			audioPush = 0.18*s.audio.Bass + 0.06*s.audio.Flux + 0.05*s.audio.Onset
+			audioPush = 0.11*s.audioLow + 0.03*s.audio.Flux + 0.02*s.audio.Onset
 		}
 		ax += rx * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
 		ay += ry * (0.16 + (1.2+1.6*s.profile.punch)*rhythmDrive + audioPush) * math.Exp(-dist*(0.03+0.01*s.profile.drift))
 
 		if s.audio.Active {
-			spin := (0.08 + 0.24*s.audio.MidRange + 0.16*s.audio.Centroid) * math.Exp(-dist*0.04)
+			spin := (0.05 + 0.16*s.audioMid + 0.10*s.audio.Centroid) * math.Exp(-dist*0.04)
 			ax += tx * spin
 			ay += ty * spin
 		}
 
-		damp := 0.988 - 0.014*s.profile.pace - (1.0-s.energy)*0.06
-		if damp < 0.79 {
-			damp = 0.79
+		drag := 0.72 + 0.30*s.profile.pace + (1.0-s.energy)*1.8
+		damp := math.Exp(-drag * dt)
+		if damp < 0.58 {
+			damp = 0.58
 		}
 
-		p.VX = (p.VX + ax*dt*60.0) * damp
-		p.VY = (p.VY + ay*dt*60.0) * damp
+		ax = clampSigned(ax, 26.0)
+		ay = clampSigned(ay, 26.0)
+		p.VX = (p.VX + ax*dt*48.0) * damp
+		p.VY = (p.VY + ay*dt*48.0) * damp
+		maxV := 34.0 + 18.0*s.profile.pace + 8.0*s.audioLow
+		p.VX = clampSigned(p.VX, maxV)
+		p.VY = clampSigned(p.VY, maxV)
 
 		if s.energy < 0.05 {
 			p.VX *= 0.92
@@ -490,16 +541,20 @@ func (s *System) Update(dt float64) {
 		}
 	}
 
-	// --- vortex phase: always spinning, bass accelerates it ---
+	// --- vortex phase: always spinning, bass accelerates it with inertia ---
 	bassDriver := s.kick*0.8 + s.snare*0.3 + s.hat*0.15
 	if s.audio.Active {
 		bassDriver = clamp01(0.25*bassDriver + 0.65*s.audio.Bass + 0.10*s.audio.Flux)
 	}
-	s.vortexPhase += dt * (0.8 + 2.5*s.profile.pace + 3.0*bassDriver)
+	targetVortexVel := 0.8 + 2.5*s.profile.pace + 3.0*bassDriver
+	// Add "weight" to the vortex: it doesn't just track bass, it has momentum
+	inertia := 1 - math.Exp(-dt*(4.0+2.0*s.profile.punch))
+	s.vortexVel += (targetVortexVel - s.vortexVel) * inertia
+	s.vortexPhase += dt * s.vortexVel
 	s.vortexBassAngle += dt * (0.15 + 0.9*s.kick + 0.3*s.snare)
 
 	// --- pulse rings: fire on rising edge of kick (once per beat) ---
-	if s.kick > 0.45 && s.prevKick <= 0.45 {
+	if s.kick > 0.60 && s.prevKick <= 0.60 {
 		maxR := math.Min(float64(s.width)*0.5, float64(s.height))
 		ringStrength := 0.55 + 0.45*s.kick
 		c := config.Mix(s.palette.Core, s.palette.Highlight, clamp01(s.kick))
@@ -524,7 +579,9 @@ func (s *System) Update(dt float64) {
 	alive := s.pulseRings[:0]
 	for i := range s.pulseRings {
 		r := &s.pulseRings[i]
-		r.radius += r.speed * dt
+		// Expansion easing: starts fast, slows down as it ages
+		expansion := 0.2 + 0.8*math.Exp(-(1.0-r.life)*3.5)
+		r.radius += r.speed * dt * expansion
 		r.life -= dt * (0.55 + 0.45*s.profile.pace)
 		if r.life > 0 {
 			alive = append(alive, *r)
@@ -555,7 +612,7 @@ func (s *System) Update(dt float64) {
 		s.synthSpec[b] = synth
 	}
 
-	// --- smooth waveform / spectrum for display ---
+	// --- smooth waveform / spectrum for display with damped spring physics ---
 	// waveform: blend audio (if active) with synthetic oscillators
 	for i := 0; i < audioinput.WaveformLen; i++ {
 		fi := float64(i) / float64(audioinput.WaveformLen-1) // 0..1 left to right
@@ -573,17 +630,19 @@ func (s *System) Update(dt float64) {
 		} else {
 			target = synthSample * (0.4 + 0.6*s.energy)
 		}
-		attack := clamp01(dt * 12)
-		release := clamp01(dt * 8)
+
+		// Spring Physics: snappier, more organic bouncing
+		stiffness := 280.0
+		damping := 24.0
 		if !s.audio.Active {
-			attack = clamp01(dt * 6.5)
-			release = attack
+			stiffness = 120.0
+			damping = 18.0
 		}
-		if target > s.waveSmooth[i] {
-			s.waveSmooth[i] += (target - s.waveSmooth[i]) * attack
-		} else {
-			s.waveSmooth[i] += (target - s.waveSmooth[i]) * release
-		}
+
+		accel := (target - s.waveSmooth[i]) * stiffness
+		s.waveVel[i] += accel * dt
+		s.waveVel[i] *= math.Max(0, 1.0-damping*dt)
+		s.waveSmooth[i] += s.waveVel[i] * dt
 	}
 	for i := 0; i < audioinput.SpectrumBands; i++ {
 		var target float64
@@ -592,20 +651,20 @@ func (s *System) Update(dt float64) {
 		} else {
 			target = s.synthSpec[i]
 		}
-		// fast attack, slow decay
-		if target > s.specSmooth[i] {
-			attack := clamp01(dt * 14)
-			if s.audio.Active {
-				attack = clamp01(dt * 24)
-			}
-			s.specSmooth[i] += (target - s.specSmooth[i]) * attack
-		} else {
-			release := clamp01(dt * 5)
-			if s.audio.Active {
-				release = clamp01(dt * 8)
-			}
-			s.specSmooth[i] += (target - s.specSmooth[i]) * release
+
+		// Damped Spring for spectrum bars: gives them "weight" and "bounce"
+		stiffness := 350.0
+		damping := 26.0
+		if target < s.specSmooth[i] {
+			// slow decay (lower stiffness/damping when falling)
+			stiffness = 140.0
+			damping = 16.0
 		}
+
+		accel := (target - s.specSmooth[i]) * stiffness
+		s.specVel[i] += accel * dt
+		s.specVel[i] *= math.Max(0, 1.0-damping*dt)
+		s.specSmooth[i] += s.specVel[i] * dt
 	}
 }
 
@@ -704,7 +763,7 @@ func (s *System) renderNebula() string {
 	if len(s.trail) == len(b) {
 		copy(s.trail, b)
 	}
-	return pixelBufToString(b, s.width, s.height)
+	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
 }
 
 // renderWaveform draws a live waveform that always moves with the beat.
@@ -839,7 +898,7 @@ func (s *System) renderWaveform() string {
 		}
 	}
 
-	return pixelBufToString(b, s.width, s.height)
+	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
 }
 
 // renderSpectrum draws animated frequency bars, always moving with the beat.
@@ -938,7 +997,7 @@ func (s *System) renderSpectrum() string {
 		}
 	}
 
-	return pixelBufToString(b, s.width, s.height)
+	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
 }
 
 // renderVortex draws a spinning vortex fully driven by the beat clock and audio.
@@ -1015,7 +1074,7 @@ func (s *System) renderVortex() string {
 
 	// core glow pulsing on kick
 	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, kickMod, snareMod, s.profile)
-	return pixelBufToString(b, s.width, s.height)
+	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
 }
 
 // renderPulse draws concentric rings expanding on every beat — always animated.
@@ -1076,25 +1135,31 @@ func (s *System) renderPulse() string {
 
 	// --- core glow ---
 	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, s.kick, s.snare, s.profile)
-	return pixelBufToString(b, s.width, s.height)
+	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
 }
 
 // pixelBufToString converts a pixel buffer into an ANSI-colored string.
-func pixelBufToString(b []pixel, w, h int) string {
+func pixelBufToString(b []pixel, w, h int, low, mid, high, flux float64) string {
 	var out strings.Builder
 	out.Grow((w + 1) * h * 4)
 	out.WriteString("\x1b[48;2;0;0;0m")
+	low = clamp01(low)
+	mid = clamp01(mid)
+	high = clamp01(high)
+	flux = clamp01(flux)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			p := b[y*w+x]
-			if p.a <= 0.01 {
+			density := toneMapDensity(p.a)
+			if density <= 0.035 {
 				out.WriteByte(' ')
 				continue
 			}
-			ir := int(clamp01(p.r) * 255)
-			ig := int(clamp01(p.g) * 255)
-			ib := int(clamp01(p.b) * 255)
-			glyph := glyphFor(p.a)
+			ir := int(clamp01(toneMapChannel(p.r)) * 255)
+			ig := int(clamp01(toneMapChannel(p.g)) * 255)
+			ib := int(clamp01(toneMapChannel(p.b)) * 255)
+			luma := clamp01((0.2126*float64(ir) + 0.7152*float64(ig) + 0.0722*float64(ib)) / 255.0)
+			glyph := glyphFor(density, luma, low, mid, high, flux)
 			out.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm%c", ir, ig, ib, glyph))
 		}
 		if y < h-1 {
@@ -1284,30 +1349,68 @@ func drawLineGlow(buf *[]pixel, w, h int, x0, y0, x1, y1 float64, c config.RGB, 
 
 func blend(dst pixel, c config.RGB, a float64) pixel {
 	a = clamp01(a)
-	dst.r += c.R * a
-	dst.g += c.G * a
-	dst.b += c.B * a
-	dst.a += a
+	dstAlpha := clamp01(dst.a)
+	gain := 1.0 - 0.34*dstAlpha
+	dst.r += c.R * a * gain
+	dst.g += c.G * a * gain
+	dst.b += c.B * a * gain
+	dst.a += a * (1.0 - 0.55*dstAlpha)
+	if dst.a > 2.8 {
+		dst.a = 2.8
+	}
 	return dst
 }
 
-func glyphFor(v float64) byte {
+func glyphFor(density, luma, low, mid, high, flux float64) byte {
+	density = clamp01(density)
+	luma = clamp01(luma)
+	drive := clamp01(density*0.70 + luma*0.30)
+	drive = clamp01(drive + 0.18*low + 0.05*mid - 0.10*high)
+
+	if high > 0.62 && flux > 0.12 && drive > 0.18 && drive < 0.66 {
+		switch {
+		case drive < 0.30:
+			return ':'
+		case drive < 0.42:
+			return '-'
+		case drive < 0.54:
+			return '*'
+		default:
+			return 'x'
+		}
+	}
+
 	switch {
-	case v < 0.08:
+	case drive < 0.07:
 		return '.'
-	case v < 0.16:
+	case drive < 0.14:
 		return ':'
-	case v < 0.28:
+	case drive < 0.24:
 		return '-'
-	case v < 0.42:
+	case drive < 0.35:
 		return '*'
-	case v < 0.58:
+	case drive < 0.50:
 		return 'o'
-	case v < 0.78:
+	case drive < 0.69:
 		return 'O'
 	default:
 		return '@'
 	}
+}
+
+func toneMapChannel(v float64) float64 {
+	if v <= 0 {
+		return 0
+	}
+	s := v * 1.25
+	return math.Pow(s/(1+s), 0.92)
+}
+
+func toneMapDensity(alpha float64) float64 {
+	if alpha <= 0 {
+		return 0
+	}
+	return math.Pow(1-math.Exp(-0.55*alpha), 0.90)
 }
 
 func clamp01(x float64) float64 {
@@ -1318,6 +1421,19 @@ func clamp01(x float64) float64 {
 		return 1
 	}
 	return x
+}
+
+func clampSigned(v, maxAbs float64) float64 {
+	if maxAbs <= 0 {
+		return 0
+	}
+	if v > maxAbs {
+		return maxAbs
+	}
+	if v < -maxAbs {
+		return -maxAbs
+	}
+	return v
 }
 
 func mix(a, b, t float64) float64 {

@@ -16,6 +16,7 @@ import (
 const (
 	particleCount = 280
 	frameRate     = 30
+	simRate       = 120
 )
 
 type frameMsg time.Time
@@ -29,6 +30,7 @@ type Model struct {
 	now        nowplaying.Info
 	lastSongID string
 	lastFrame  time.Time
+	simAccum   float64
 	flashUntil time.Time
 
 	playingStyle lipgloss.Style
@@ -100,7 +102,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case frameMsg:
 		now := time.Time(msg)
 		dt := now.Sub(m.lastFrame).Seconds()
-		if dt <= 0 || dt > 0.2 {
+		if dt <= 0 || dt > 0.33 {
 			dt = 1.0 / frameRate
 		}
 		m.lastFrame = now
@@ -120,7 +122,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Spectrum:    audio.Spectrum,
 			})
 		}
-		m.vis.Update(dt)
+		simStep := 1.0 / simRate
+		m.simAccum += dt
+		if m.simAccum > 0.25 {
+			m.simAccum = 0.25
+		}
+		for m.simAccum >= simStep {
+			m.vis.Update(simStep)
+			m.simAccum -= simStep
+		}
 		return m, frameTick()
 
 	case pollMsg:
