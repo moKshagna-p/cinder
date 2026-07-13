@@ -127,6 +127,10 @@ func (s *System) Update(dt float64) {
 		o.y = s.cy + ey*r*(0.42+0.24*s.profile.trippy) + wobbleY
 	}
 
+	// Field forces fade out with energy so pause actually freezes the
+	// cloud (README behavior) instead of turbulence pumping it forever.
+	forceDrive := 0.06 + 0.94*s.energy
+
 	s.rebuildFluidGrid()
 	// Cohesion (audio level) gathers loose clusters; separation pressure
 	// (bass) pushes near neighbors apart. Both are true forces: scaled by
@@ -230,6 +234,8 @@ func (s *System) Update(dt float64) {
 			ay -= (dragCoef * p.VY * speed) / p.Mass
 		}
 
+		ax *= forceDrive
+		ay *= forceDrive
 		ax = clampSigned(ax, 26.0)
 		ay = clampSigned(ay, 26.0)
 		p.VX = (p.VX + ax*dt*48.0) * damp
