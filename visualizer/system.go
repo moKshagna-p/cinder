@@ -45,6 +45,7 @@ type Particle struct {
 	Y          float64
 	VX         float64
 	VY         float64
+	Mass       float64
 	Life       float64
 	MaxLife    float64
 	Decay      float64
@@ -318,8 +319,8 @@ func (s *System) audioBurst(strength float64) {
 		speed := 5.0 + 24.0*strength + s.rnd.Float64()*8.0
 		p.X = s.cx + (s.rnd.Float64()-0.5)*(3.0+6.0*strength)
 		p.Y = s.cy + (s.rnd.Float64()-0.5)*(2.0+4.0*strength)
-		p.VX += math.Cos(a) * speed
-		p.VY += math.Sin(a) * speed * (0.7 + 0.3*s.rnd.Float64())
+		p.VX += (math.Cos(a) * speed) / p.Mass
+		p.VY += (math.Sin(a) * speed * (0.7 + 0.3*s.rnd.Float64())) / p.Mass
 		p.Brightness = math.Max(p.Brightness, 1.0+0.8*strength)
 		p.Life = math.Max(p.Life, 0.9+0.9*strength)
 		p.MaxLife = math.Max(p.MaxLife, p.Life)
@@ -507,10 +508,57 @@ func (s *System) Update(dt float64) {
 			ay += ty * spin
 		}
 
+		// --- N-body fluid physics (realistic interactions) ---
+		fluidAx := 0.0
+		fluidAy := 0.0
+		for j := range s.particles {
+			if i == j {
+				continue
+			}
+			p2 := &s.particles[j]
+			dx2 := p2.X - p.X
+			dy2 := p2.Y - p.Y
+			distSq := dx2*dx2 + dy2*dy2
+			
+			// Soften the distance to prevent singularities
+			softDistSq := distSq + 1.2
+			invDistSq := 1.0 / softDistSq
+			invDist := math.Sqrt(invDistSq)
+			
+			nx := dx2 * invDist
+			ny := dy2 * invDist
+			
+			// Gravity attracts particles to form dense clusters
+			gravForce := (0.2 + 0.4*s.audio.Level) * p.Mass * p2.Mass * invDistSq
+			
+			// Repulsion pushes them apart when too close (gas/fluid pressure)
+			repulseForce := (1.2 + 2.5*s.audio.Bass) * p.Mass * p2.Mass * invDistSq * invDistSq
+			
+			netForce := gravForce - repulseForce
+			fluidAx += nx * netForce
+			fluidAy += ny * netForce
+		}
+		
+		ax += fluidAx
+		ay += fluidAy
+		
+		// Newton's Second Law: a = F / m
+		ax /= p.Mass
+		ay /= p.Mass
+
 		drag := 0.72 + 0.30*s.profile.pace + (1.0-s.energy)*1.8
 		damp := math.Exp(-drag * dt)
 		if damp < 0.58 {
 			damp = 0.58
+		}
+
+		// Realistic aerodynamic drag force proportional to v^2
+		speedSq := p.VX*p.VX + p.VY*p.VY
+		if speedSq > 0.01 {
+			speed := math.Sqrt(speedSq)
+			dragCoef := (0.004 + 0.002*s.profile.pace) * drag
+			ax -= (dragCoef * p.VX * speed) / p.Mass
+			ay -= (dragCoef * p.VY * speed) / p.Mass
 		}
 
 		ax = clampSigned(ax, 26.0)
@@ -795,7 +843,15 @@ func (s *System) renderWaveform() string {
 	if s.audio.Active {
 		bassDrive = s.audio.Bass
 	}
+	trebleDrive := s.hat
+	if s.audio.Active {
+		trebleDrive = s.audio.Treble
+	}
 	scale := mid * (0.22 + 0.42*audioLevel + 0.12*bassDrive)
+
+	// Make the entire wave baseline heave up and down with the bass (Lows)
+	midOffset := math.Sin(s.phase*4.0) * bassDrive * 12.0
+	mid += midOffset
 
 	for x := 0; x < s.width; x++ {
 		idx := int(float64(x) * colStep)
@@ -809,8 +865,11 @@ func (s *System) renderWaveform() string {
 		}
 		sample := s.waveSmooth[idx]*(1-t) + s.waveSmooth[idxNext]*t
 
+		// Add high-frequency jitter to the wave surface based on treble (Highs)
+		jitter := math.Sin(float64(x)*1.5 + s.phase*20.0) * trebleDrive * 6.0
+
 		// primary wave position
-		ys := mid - sample*scale
+		ys := mid - sample*scale + jitter
 
 		// --- draw filled area between midline and wave (oscilloscope fill) ---
 		y0 := int(math.Round(math.Min(mid, ys)))
@@ -921,6 +980,15 @@ func (s *System) renderSpectrum() string {
 		}
 	}
 
+	bassDrive := s.kick
+	if s.audio.Active {
+		bassDrive = s.audio.Bass
+	}
+	trebleDrive := s.hat
+	if s.audio.Active {
+		trebleDrive = s.audio.Treble
+	}
+
 	for band := 0; band < bands; band++ {
 		energy := s.specSmooth[band]
 		bandNorm := float64(band) / float64(bands-1) // 0=bass, 1=treble
@@ -930,6 +998,14 @@ func (s *System) renderSpectrum() string {
 		if s.audio.Active {
 			boost = 0.74 + 0.08*s.audio.Level
 		}
+		
+		// React strongly to highs and lows explicitly
+		if bandNorm < 0.3 { // Bass bands
+			boost += 1.4 * bassDrive
+		} else if bandNorm > 0.7 { // Treble bands
+			boost += 1.6 * trebleDrive
+		}
+
 		barH := int(math.Round(energy * float64(s.height) * boost))
 		if barH < 1 {
 			barH = 0
@@ -1022,10 +1098,14 @@ func (s *System) renderVortex() string {
 		trebleMod = s.audio.Treble*0.82 + hatMod*0.18
 	}
 
+	// Squeeze and stretch the entire vortex space based on Bass (Lows)
+	dynAX := aX * (1.0 - 0.25*math.Sin(s.phase*8.0)*bassMod)
+	dynAY := aY * (1.0 + 0.30*math.Cos(s.phase*8.0)*bassMod)
+
 	for y := 0; y < s.height; y++ {
 		for x := 0; x < s.width; x++ {
-			fx := (float64(x) - s.cx) / aX
-			fy := (float64(y) - s.cy) / aY
+			fx := (float64(x) - s.cx) / dynAX
+			fy := (float64(y) - s.cy) / dynAY
 			r := math.Hypot(fx, fy)
 			if r > maxR || r < 0.5 {
 				continue
@@ -1037,6 +1117,9 @@ func (s *System) renderVortex() string {
 			// primary spiral: phase-driven rotation + radial twist
 			rot := s.vortexPhase + s.vortexBassAngle*bassMod
 			spiral := theta + rot + rNorm*math.Pi*(2.5+3.5*s.profile.chaos+2.0*bassMod)
+			
+			// Jagged chaotic disruption of the spiral based on Treble (Highs)
+			spiral += math.Sin(rNorm*30.0 - s.phase*25.0) * trebleMod * 0.25
 
 			// arm brightness: multiple harmonics of the spiral angle
 			arm1 := math.Cos(float64(arms) * spiral)
@@ -1111,6 +1194,11 @@ func (s *System) renderPulse() string {
 	}
 
 	// --- expanding beat rings ---
+	trebleMod := s.hat
+	if s.audio.Active {
+		trebleMod = s.audio.Treble
+	}
+	
 	for _, ring := range s.pulseRings {
 		alpha := ring.life * ring.life * 0.90
 		if alpha < 0.01 {
@@ -1121,14 +1209,21 @@ func (s *System) renderPulse() string {
 
 		angStep := math.Max(0.008, 0.025-ring.radius*0.0002)
 		for angle := 0.0; angle < 2*math.Pi; angle += angStep {
-			px := s.cx + math.Cos(angle)*rX
-			py := s.cy + math.Sin(angle)*rY
+			// Treble causes the rings to vibrate/become jagged
+			jitterX := math.Cos(angle*12.0 + s.phase*15.0) * trebleMod * 2.5
+			jitterY := math.Sin(angle*12.0 + s.phase*15.0) * trebleMod * 2.5
+			
+			px := s.cx + math.Cos(angle)*rX + jitterX
+			py := s.cy + math.Sin(angle)*rY + jitterY
 			splat(&b, s.width, s.height, px, py, ring.color, alpha)
 		}
 		// slightly thicker ring (second pass at slight offset)
 		for angle := 0.0; angle < 2*math.Pi; angle += angStep {
-			px := s.cx + math.Cos(angle)*(rX+1.5)
-			py := s.cy + math.Sin(angle)*(rY+0.75)
+			jitterX := math.Cos(angle*12.0 + s.phase*15.0) * trebleMod * 2.5
+			jitterY := math.Sin(angle*12.0 + s.phase*15.0) * trebleMod * 2.5
+			
+			px := s.cx + math.Cos(angle)*(rX+1.5) + jitterX
+			py := s.cy + math.Sin(angle)*(rY+0.75) + jitterY
 			splat(&b, s.width, s.height, px, py, ring.color, alpha*0.5)
 		}
 	}
@@ -1190,6 +1285,7 @@ func (s *System) spawn(initial bool) Particle {
 		Y:          y,
 		VX:         math.Cos(a+math.Pi/2)*(base*(0.45+s.rnd.Float64())) + (s.rnd.Float64()-0.5)*(1.4+2.2*s.profile.chaos),
 		VY:         math.Sin(a+math.Pi/2)*(base*(0.45+s.rnd.Float64())) + (s.rnd.Float64()-0.5)*(1.2+2.0*s.profile.chaos),
+		Mass:       0.5 + s.rnd.Float64()*1.5,
 		Life:       1.2 + s.rnd.Float64()*2.8,
 		MaxLife:    1.2 + s.rnd.Float64()*2.8,
 		Decay:      0.16 + s.rnd.Float64()*0.35,
