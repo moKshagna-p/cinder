@@ -139,6 +139,10 @@ type System struct {
 
 	// synthetic waveform oscillators (always-on, used when audio inactive)
 	synthWavePhase [4]float64 // 4 oscillator phases
+
+	// fluid neighbor grid (linked cells), rebuilt each Update
+	fluidHead []int
+	fluidNext []int
 }
 
 type pulseRing struct {

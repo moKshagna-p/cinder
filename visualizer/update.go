@@ -112,6 +112,13 @@ func (s *System) Update(dt float64) {
 		o.y = s.cy + ey*r*(0.42+0.24*s.profile.trippy) + wobbleY
 	}
 
+	s.rebuildFluidGrid()
+	// Cohesion (audio level) gathers loose clusters; separation pressure
+	// (bass) pushes near neighbors apart. Both are true forces: scaled by
+	// the neighbor's mass here, divided by the particle's own mass below.
+	cohesionK := 0.20 + 0.40*s.audio.Level
+	pressureK := 1.20 + 2.50*s.audio.Bass
+
 	for i := range s.particles {
 		p := &s.particles[i]
 
@@ -188,43 +195,10 @@ func (s *System) Update(dt float64) {
 			ay += ty * spin
 		}
 
-		// --- N-body fluid physics (realistic interactions) ---
-		fluidAx := 0.0
-		fluidAy := 0.0
-		for j := range s.particles {
-			if i == j {
-				continue
-			}
-			p2 := &s.particles[j]
-			dx2 := p2.X - p.X
-			dy2 := p2.Y - p.Y
-			distSq := dx2*dx2 + dy2*dy2
-
-			// Soften the distance to prevent singularities
-			softDistSq := distSq + 1.2
-			invDistSq := 1.0 / softDistSq
-			invDist := math.Sqrt(invDistSq)
-
-			nx := dx2 * invDist
-			ny := dy2 * invDist
-
-			// Gravity attracts particles to form dense clusters
-			gravForce := (0.2 + 0.4*s.audio.Level) * p.Mass * p2.Mass * invDistSq
-
-			// Repulsion pushes them apart when too close (gas/fluid pressure)
-			repulseForce := (1.2 + 2.5*s.audio.Bass) * p.Mass * p2.Mass * invDistSq * invDistSq
-
-			netForce := gravForce - repulseForce
-			fluidAx += nx * netForce
-			fluidAy += ny * netForce
-		}
-
-		ax += fluidAx
-		ay += fluidAy
-
-		// Newton's Second Law: a = F / m
-		ax /= p.Mass
-		ay /= p.Mass
+		// --- local fluid forces (cohesion + separation pressure) ---
+		fluidFx, fluidFy := s.fluidForces(i, cohesionK, pressureK)
+		ax += fluidFx / p.Mass
+		ay += fluidFy / p.Mass
 
 		drag := 0.72 + 0.30*s.profile.pace + (1.0-s.energy)*1.8
 		damp := math.Exp(-drag * dt)
