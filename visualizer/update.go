@@ -333,7 +333,18 @@ func (s *System) Update(dt float64) {
 
 	// --- smooth waveform / spectrum for display with damped spring physics ---
 	// waveform: blend audio (if active) with synthetic oscillators
+	waveFollow := 1 - math.Exp(-dt*45)
 	for i := 0; i < audioinput.WaveformLen; i++ {
+		if s.audio.Active {
+			// The audio buffer scrolls under the display every hop, so a
+			// spring per column chases a moving target and smears
+			// transients into vertical wobble. Track the real waveform
+			// directly with a fast blend instead.
+			s.waveSmooth[i] += (s.audio.WaveformBuf[i] - s.waveSmooth[i]) * waveFollow
+			s.waveVel[i] = 0
+			continue
+		}
+
 		fi := float64(i) / float64(audioinput.WaveformLen-1) // 0..1 left to right
 		// synthetic wave: sum of oscillators, spatially varying
 		synthSample := 0.0
@@ -342,22 +353,11 @@ func (s *System) Update(dt float64) {
 		synthSample += math.Sin(s.synthWavePhase[2]+fi*math.Pi*6*(0.5+s.profile.chaos)) * (0.2 + 0.2*s.hat)
 		synthSample += math.Sin(s.synthWavePhase[3]+fi*math.Pi*8*s.profile.trippy) * 0.1
 		synthSample *= 0.8 // normalise so it stays in roughly ±1
+		target := synthSample * (0.4 + 0.6*s.energy)
 
-		var target float64
-		if s.audio.Active {
-			target = s.audio.WaveformBuf[i]
-		} else {
-			target = synthSample * (0.4 + 0.6*s.energy)
-		}
-
-		// Spring Physics: snappier, more organic bouncing
-		stiffness := 280.0
-		damping := 24.0
-		if !s.audio.Active {
-			stiffness = 120.0
-			damping = 18.0
-		}
-
+		// damped spring: gentle organic bounce for the synthetic wave
+		const stiffness = 120.0
+		const damping = 18.0
 		accel := (target - s.waveSmooth[i]) * stiffness
 		s.waveVel[i] += accel * dt
 		s.waveVel[i] *= math.Max(0, 1.0-damping*dt)
