@@ -27,6 +27,20 @@ func (s *System) Update(dt float64) {
 	if s.audio.Active && s.audio.BPM >= 60 {
 		beatsPerSec = (0.30*s.bpm + 0.70*s.audio.BPM) / 60.0
 	}
+
+	// Phase-lock the synthetic clock to real onsets: when a strong onset
+	// lands off the synthetic beat, pull songClock toward it so the groove
+	// and the music stop fighting each other instead of layering two
+	// slightly-offset rhythms.
+	onsetRising := s.audio.Active && s.audio.Onset > 0.58 && s.prevOnset <= 0.58
+	if onsetRising && beatsPerSec > 0 {
+		phaseErr := fract(s.songClock*beatsPerSec + s.rhythmOffset)
+		if phaseErr > 0.5 {
+			phaseErr -= 1
+		}
+		s.songClock -= 0.30 * phaseErr / beatsPerSec
+	}
+
 	beat := fract(s.songClock*beatsPerSec + s.rhythmOffset)
 	bar := fract(s.songClock*beatsPerSec/4.0 + s.rhythmOffset*0.37)
 	section := fract(s.songClock*beatsPerSec/s.sectionLen + s.rhythmOffset*0.17)
@@ -86,7 +100,8 @@ func (s *System) Update(dt float64) {
 	s.audioMid = s.audioMid + (audioMid-s.audioMid)*(1-math.Exp(-dt*5.5))
 	s.audioHigh = s.audioHigh + (audioHigh-s.audioHigh)*(1-math.Exp(-dt*6.0))
 	s.sectionMorph = 0.5 + 0.5*math.Sin(2*math.Pi*section+math.Pi*s.profile.trippy)
-	if s.audio.Active && s.audio.Onset > 0.58 && s.prevOnset <= 0.58 {
+	if onsetRising && (s.songClock-s.lastBurstClock)*beatsPerSec >= 0.45 {
+		s.lastBurstClock = s.songClock
 		s.audioBurst(clamp01(0.14*s.audio.Onset + 0.06*s.audioHigh + 0.10*s.audioLow))
 	}
 	s.prevOnset = s.audio.Onset
@@ -255,8 +270,10 @@ func (s *System) Update(dt float64) {
 	s.vortexPhase += dt * s.vortexVel
 	s.vortexBassAngle += dt * (0.15 + 0.9*s.kick + 0.3*s.snare)
 
-	// --- pulse rings: fire on rising edge of kick (once per beat) ---
-	if s.kick > 0.60 && s.prevKick <= 0.60 {
+	// --- pulse rings: fire on rising edge of kick, at most once per beat ---
+	ringReady := (s.songClock-s.lastRingClock)*beatsPerSec >= 0.45
+	if s.kick > 0.60 && s.prevKick <= 0.60 && ringReady {
+		s.lastRingClock = s.songClock
 		maxR := math.Min(float64(s.width)*0.5, float64(s.height))
 		ringStrength := 0.55 + 0.45*s.kick
 		c := config.Mix(s.palette.Core, s.palette.Highlight, clamp01(s.kick))

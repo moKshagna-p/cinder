@@ -127,6 +127,9 @@ type System struct {
 	pulseRings []pulseRing
 	prevKick   float64 // edge-detect: only spawn on rising edge
 	prevOnset  float64
+	// refractory clocks (songClock timestamps) so one beat can't double-fire
+	lastRingClock  float64
+	lastBurstClock float64
 
 	// vortex state
 	vortexPhase     float64
@@ -227,6 +230,8 @@ func (s *System) SetSongSignature(songKey, track, artist string) {
 	s.kick = 0
 	s.snare = 0
 	s.hat = 0
+	s.lastRingClock = -10
+	s.lastBurstClock = -10
 	s.voidRadius = s.profile.voidSize + float64((seed>>30)%16)/20.0
 	s.initOrbiters(s.profile.orbiters)
 }
