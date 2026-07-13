@@ -14,8 +14,9 @@ make build        # go build -o bin/cinder .
 make fmt          # go fmt ./...
 make tidy         # go mod tidy
 
-go test ./...                              # all tests (only audioinput has tests)
+go test ./...                              # all tests (audioinput + visualizer)
 go test ./audioinput -run TestName -v      # single test
+go test ./visualizer -bench . -run xxx     # Update/Render benchmarks
 
 go run . --normal                          # force non-audio-reactive mode
 go run . --audio-device "BlackHole 2ch"    # explicit capture device
@@ -23,7 +24,7 @@ go run . --doctor                          # check ffmpeg/devices/nowplaying-cli
 go run . --list-audio-devices
 ```
 
-There is no linter configured. Visual changes can only be verified by running the app in a real terminal with music playing — there is no headless render test.
+There is no linter configured; run `gofmt -w` before committing. `visualizer/system_test.go` smoke-tests all five render modes headlessly (frame dimensions, NaN/velocity-clamp stability, pause-freeze), but the actual look can only be judged by running the app in a real terminal with music playing.
 
 ## Environment variables
 
@@ -41,19 +42,21 @@ Two independent input pipelines feed one simulation:
 
 3. **UI** (`ui/model.go`): Bubble Tea model. Render tick at 30 fps; physics run at a fixed 120 Hz timestep via an accumulator (`simAccum`), so `System.Update(dt)` always gets dt = 1/120 — never assume variable dt there. The bottom terminal row is reserved for the footer HUD; the visualizer gets `height-1`. On song change: `SetSongSignature` + `PaletteFromSong` + `Explode()`.
 
-4. **Simulation/render** (`visualizer/system.go`, ~1600 lines, the heart of the project): `System.Update` advances physics, `System.Render` dispatches to one of five modes (Nebula/Waveform/Spectrum/Vortex/Pulse, cycled with `m`). Each mode paints into a `[]pixel` float RGBA buffer, then `pixelBufToString` tone-maps and converts every cell to an ANSI truecolor escape + ASCII glyph (`glyphFor` picks `.:-*oO@` by density/luma).
+4. **Simulation/render** (`visualizer/`, the heart of the project): `System.Update` (update.go) advances physics at 120 Hz; `System.Render` dispatches to one of five modes (Nebula/Waveform/Spectrum/Vortex/Pulse, cycled with `m`), one file per mode (`render_*.go`). Each mode paints into a reusable `[]pixel` float RGBA buffer (`acquireFrame`), then `frameToString` (framebuffer.go) tone-maps and converts cells to ANSI truecolor + ASCII glyphs. Supporting files: `fluid.go` (neighbor-grid particle-particle forces), `profile.go` (per-song motion profile), `mathutil.go`, `system.go` (state, spawn, song/palette/mode setters).
 
 ## Key design conventions
 
-- **Synthetic-first rhythm**: the visualizer must always animate, even with no audio. A synthetic beat clock (`songClock` × BPM derived from the song-title hash) drives `kick`/`snare`/`hat` envelopes; when `audio.Active`, real features are *blended over* the synthetic groove (see the `audioBlend` mixing in `Update`), never a hard switch. Every render mode has a synthetic fallback path (`synthSpec`, `synthWavePhase`).
+- **Synthetic-first rhythm**: the visualizer must always animate, even with no audio. A synthetic beat clock (`songClock` × BPM derived from the song-title hash) drives `kick`/`snare`/`hat` envelopes; when `audio.Active`, real features are *blended over* the synthetic groove (see the `audioBlend` mixing in `Update`), never a hard switch, and strong onsets phase-lock `songClock` to the real beat. Every render mode has a synthetic fallback path (`synthSpec`, `synthWavePhase`).
+- **Beat triggers are edge-detected with refractory windows** (`lastRingClock`, `lastBurstClock`): pulse rings and audio bursts fire at most once per ~half beat. Follow this pattern for any new beat-triggered effect.
+- **Field forces scale with `forceDrive` (energy)**: pause must actually freeze the cloud. Any new per-particle force must not inject energy when `s.energy` ≈ 0 (`TestPauseFreezesParticles` enforces this).
+- **Particle-particle forces go through the fluid grid** (`fluid.go`): bounded polynomial kernels, capped neighbor count. Never add an all-pairs O(n²) pass — at 280 particles × 120 Hz it saturates the acceleration clamp and the frame budget.
+- **Renderer invariants** (framebuffer.go): color escapes are emitted only on change (RLE), glyph selection has per-cell hysteresis to prevent shimmer, and `Update`/`Render` are allocation-free apart from the final string copy — keep them that way (the benchmarks report allocs/op).
 - **Per-song determinism**: motion profile (`buildMotionProfile`) and palette (`config.PaletteFromSong`) are hashed from song title/artist (FNV / SHA-1), plus keyword heuristics ("remix" → faster, "ambient" → slower). Same song always looks the same.
 - **Smoothing idiom**: time-based exponential blends `x += (target-x) * (1-exp(-dt*k))` for physics state; display bars/waveform use damped springs with asymmetric attack/release. Feature envelopes in `audioinput` use per-FFT-frame `smoothAttackRelease` coefficients (frame-rate dependent, not dt-based).
 - **Terminal aspect ratio**: cells are ~2× taller than wide. Circular modes (Vortex, Pulse) correct with `aY = 2.0`; nebula spawn/void use ad-hoc y-squash factors (0.6, 1.25). Keep any new radial geometry aspect-corrected or circles render as tall ellipses.
-- **All per-frame allocations matter**: `Render` runs 30×/sec over width×height cells; `Update` runs 120×/sec over 280 particles. Anything O(particles²) or allocating per cell is a performance hazard.
 - `visualizer.AudioFeatures` mirrors `audioinput.Features` field-for-field (copied manually in ui/model.go) so the visualizer package doesn't depend on capture internals — keep them in sync when adding a feature.
 
 ## Gotchas
 
 - `ui/model.go` has dead code kept intentionally (`songLabel`, `decoratePlaying`, `truncate`).
-- A stale compiled binary `./cinder` sits untracked in the repo root; the Makefile builds to `bin/`.
 - Release flow: `.github/workflows/release.yml` builds darwin binaries on tag push and updates the Homebrew tap (`moKshagna-p/cinder`, formula `cinder-tui`).
