@@ -143,6 +143,11 @@ type System struct {
 	// fluid neighbor grid (linked cells), rebuilt each Update
 	fluidHead []int
 	fluidNext []int
+
+	// reusable render buffers (see framebuffer.go)
+	frameBuf  []pixel
+	outBuf    []byte
+	glyphBand []byte // per-cell glyph band from last frame, for hysteresis
 }
 
 type pulseRing struct {

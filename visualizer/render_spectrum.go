@@ -9,7 +9,7 @@ import (
 
 // renderSpectrum draws animated frequency bars, always moving with the beat.
 func (s *System) renderSpectrum() string {
-	b := make([]pixel, s.width*s.height)
+	b := s.acquireFrame()
 	bands := audioinput.SpectrumBands
 
 	// distribute bars across the full width with 1-col gaps
@@ -120,5 +120,5 @@ func (s *System) renderSpectrum() string {
 		}
 	}
 
-	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
+	return s.frameToString(b)
 }

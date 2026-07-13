@@ -7,7 +7,7 @@ import (
 )
 
 func (s *System) renderNebula() string {
-	b := make([]pixel, s.width*s.height)
+	b := s.acquireFrame()
 	bassPulse := s.kick
 	midDrive := s.snare
 	trebleShimmer := s.hat
@@ -38,9 +38,9 @@ func (s *System) renderNebula() string {
 			b[i] = s.trail[i]
 		}
 	}
-	addNebulaCloud(&b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, bassPulse, midDrive, s.profile)
-	applyVoid(&b, s.width, s.height, s.cx, s.cy, s.voidRadius*(0.82+0.55*bassPulse))
-	drawOrbiters(&b, s.width, s.height, s.palette, s.orbiters, 0.35+0.55*s.energy+0.25*midDrive, s.profile)
+	addNebulaCloud(b, s.width, s.height, s.cx, s.cy, s.palette, s.phase, s.energy, s.sectionMorph, bassPulse, midDrive, s.profile)
+	applyVoid(b, s.width, s.height, s.cx, s.cy, s.voidRadius*(0.82+0.55*bassPulse))
+	drawOrbiters(b, s.width, s.height, s.palette, s.orbiters, 0.35+0.55*s.energy+0.25*midDrive, s.profile)
 
 	for _, p := range s.particles {
 		age := p.Life / p.MaxLife
@@ -75,17 +75,17 @@ func (s *System) renderNebula() string {
 		alpha := (0.22 + 0.78*age) * p.Brightness
 		alpha *= 0.28 + 0.48*s.energy + 0.18*s.profile.glow + 0.16*brightness
 		alpha *= 0.76 + 0.42*bassPulse + 0.22*onsetFlash + 0.10*trebleShimmer
-		splat(&b, s.width, s.height, p.X, p.Y, c, alpha)
+		splat(b, s.width, s.height, p.X, p.Y, c, alpha)
 	}
 
-	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, bassPulse, onsetFlash, s.profile)
+	addCoreGlow(b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, bassPulse, onsetFlash, s.profile)
 	if len(s.trail) == len(b) {
 		copy(s.trail, b)
 	}
-	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
+	return s.frameToString(b)
 }
 
-func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, phase, energy, sectionMorph, kick, snare float64, profile motionProfile) {
+func addNebulaCloud(buf []pixel, w, h int, cx, cy float64, p config.Palette, phase, energy, sectionMorph, kick, snare float64, profile motionProfile) {
 	if w < 4 || h < 4 {
 		return
 	}
@@ -116,12 +116,12 @@ func addNebulaCloud(buf *[]pixel, w, h int, cx, cy float64, p config.Palette, ph
 				c = config.Mix(c, p.Highlight, (profile.trippy-0.5)*0.35+0.20*wave)
 			}
 			idx := y*w + x
-			(*buf)[idx] = blend((*buf)[idx], c, a)
+			buf[idx] = blend(buf[idx], c, a)
 		}
 	}
 }
 
-func applyVoid(buf *[]pixel, w, h int, cx, cy, radius float64) {
+func applyVoid(buf []pixel, w, h int, cx, cy, radius float64) {
 	if radius < 1 {
 		return
 	}
@@ -153,15 +153,15 @@ func applyVoid(buf *[]pixel, w, h int, cx, cy, radius float64) {
 			t := 1 - d/radius
 			dim := 1 - 0.96*t*t
 			idx := y*w + x
-			(*buf)[idx].r *= dim
-			(*buf)[idx].g *= dim
-			(*buf)[idx].b *= dim
-			(*buf)[idx].a *= dim
+			buf[idx].r *= dim
+			buf[idx].g *= dim
+			buf[idx].b *= dim
+			buf[idx].a *= dim
 		}
 	}
 }
 
-func drawOrbiters(buf *[]pixel, w, h int, p config.Palette, orbiters []Orbiter, energy float64, profile motionProfile) {
+func drawOrbiters(buf []pixel, w, h int, p config.Palette, orbiters []Orbiter, energy float64, profile motionProfile) {
 	for i := range orbiters {
 		o := orbiters[i]
 		trace := config.Mix(p.Highlight, p.Core, 0.18+0.18*float64(i%3)+0.18*profile.trippy)

@@ -8,7 +8,7 @@ import (
 
 // renderVortex draws a spinning vortex fully driven by the beat clock and audio.
 func (s *System) renderVortex() string {
-	b := make([]pixel, s.width*s.height)
+	b := s.acquireFrame()
 	// terminal cells are roughly 2× taller than wide — correct for circle
 	const aX = 1.0
 	const aY = 2.0
@@ -86,6 +86,6 @@ func (s *System) renderVortex() string {
 	}
 
 	// core glow pulsing on kick
-	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, kickMod, snareMod, s.profile)
-	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
+	addCoreGlow(b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, kickMod, snareMod, s.profile)
+	return s.frameToString(b)
 }

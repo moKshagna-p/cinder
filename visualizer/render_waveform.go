@@ -10,7 +10,7 @@ import (
 // renderWaveform draws a live waveform that always moves with the beat.
 // When audio is active it shows real amplitude; otherwise synthetic oscillators drive it.
 func (s *System) renderWaveform() string {
-	b := make([]pixel, s.width*s.height)
+	b := s.acquireFrame()
 	mid := s.cy
 
 	// --- Background: radial glow that pulses with kick/snare ---
@@ -150,5 +150,5 @@ func (s *System) renderWaveform() string {
 		}
 	}
 
-	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
+	return s.frameToString(b)
 }

@@ -8,7 +8,7 @@ import (
 
 // renderPulse draws concentric rings expanding on every beat — always animated.
 func (s *System) renderPulse() string {
-	b := make([]pixel, s.width*s.height)
+	b := s.acquireFrame()
 
 	const aY = 2.0 // aspect correction
 
@@ -35,7 +35,7 @@ func (s *System) renderPulse() string {
 		for angle := 0.0; angle < 2*math.Pi; angle += angStep {
 			px := s.cx + math.Cos(angle)*rX
 			py := s.cy + math.Sin(angle)*rY
-			splat(&b, s.width, s.height, px, py, c, opacity)
+			splat(b, s.width, s.height, px, py, c, opacity)
 		}
 	}
 
@@ -61,7 +61,7 @@ func (s *System) renderPulse() string {
 
 			px := s.cx + math.Cos(angle)*rX + jitterX
 			py := s.cy + math.Sin(angle)*rY + jitterY
-			splat(&b, s.width, s.height, px, py, ring.color, alpha)
+			splat(b, s.width, s.height, px, py, ring.color, alpha)
 		}
 		// slightly thicker ring (second pass at slight offset)
 		for angle := 0.0; angle < 2*math.Pi; angle += angStep {
@@ -70,11 +70,11 @@ func (s *System) renderPulse() string {
 
 			px := s.cx + math.Cos(angle)*(rX+1.5) + jitterX
 			py := s.cy + math.Sin(angle)*(rY+0.75) + jitterY
-			splat(&b, s.width, s.height, px, py, ring.color, alpha*0.5)
+			splat(b, s.width, s.height, px, py, ring.color, alpha*0.5)
 		}
 	}
 
 	// --- core glow ---
-	addCoreGlow(&b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, s.kick, s.snare, s.profile)
-	return pixelBufToString(b, s.width, s.height, s.audioLow, s.audioMid, s.audioHigh, s.audio.Flux)
+	addCoreGlow(b, s.width, s.height, s.cx, s.cy, s.palette, s.energy, s.kick, s.snare, s.profile)
+	return s.frameToString(b)
 }
